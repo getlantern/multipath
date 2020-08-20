@@ -27,7 +27,7 @@ func newReceiveQueue(size int) *receiveQueue {
 	rq := &receiveQueue{
 		buf:  make([]frame, size),
 		size: uint64(size),
-		rp:   1, // frame number starts with 1, so should the read pointer
+		rp:   minFrameNumber % uint64(size), // frame number starts with 10, so should the read pointer
 		cond: sync.NewCond(&sync.Mutex{}),
 	}
 	return rq

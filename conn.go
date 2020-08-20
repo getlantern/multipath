@@ -18,6 +18,7 @@ type bondConn struct {
 
 func newBondConn(bondID uint64) *bondConn {
 	return &bondConn{bondID: bondID,
+		nextFN:    minFrameNumber - 1,
 		recvQueue: newReceiveQueue(4096),
 	}
 }
@@ -76,10 +77,15 @@ func (bc *bondConn) first() *subflow {
 
 func (bc *bondConn) retransmit(frame sendFrame) {
 	subflows := bc.sortSubflows()
+	frame.retransmissions++
+	if frame.retransmissions >= len(subflows)-1 {
+		log.Debugf("Give up retransmitting frame# %v", frame.fn)
+		return
+	}
 	for _, sf := range subflows {
 		// choose the first subflow not waiting ack for this frame
 		if !sf.isPendingAck(frame.fn) {
-			log.Tracef("Resending frame# %v", frame.fn)
+			log.Tracef("Retransmitting frame# %v", frame.fn)
 			sf.sendQueue <- frame
 		}
 	}

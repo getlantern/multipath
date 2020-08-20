@@ -13,8 +13,7 @@
 //
 // There are two types of frames. Data frame carries application data while ack
 // frame carries acknowledgement to the frame just received. Payload size and
-// frame number starts from 1 and uses variable-length integer encoding as
-// described here:
+// frame number uses variable-length integer encoding as described here:
 // https://tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
 //
 //       --------------------------------------------------------
@@ -25,11 +24,18 @@
 //      |  00000000  |  ack frame number (1-8)  |
 //       ---------------------------------------
 //
-// Probe frame is a special type of ack frame which has a frame number of 0.
-// It's for updating RTT on inactive subflows and detecting recovered subflows.
+// Ack frames with frame number < 10 are reserved for control. For now only 0
+// and 1 are used, for ping and pong frame respectively.  They are used to
+// update RTT on inactive subflows and detect recovered subflows.
 //
+// Ping frame:
 //       -------------------------
 //      |  00000000  |  00000000  |
+//       -------------------------
+//
+// Pong frame:
+//       -------------------------
+//      |  00000000  |  00000001  |
 //       -------------------------
 
 package bond
@@ -37,10 +43,15 @@ package bond
 import (
 	"bytes"
 	"errors"
-	"time"
 
 	"github.com/getlantern/golog"
 	pool "github.com/libp2p/go-buffer-pool"
+)
+
+const (
+	minFrameNumber uint64 = 10
+	frameTypePing  uint64 = 0
+	frameTypePong  uint64 = 1
 )
 
 var (
@@ -55,10 +66,10 @@ type frame struct {
 }
 
 type sendFrame struct {
-	fn          uint64
-	buf         []byte
-	isDataFrame bool
-	firstSentAt time.Time // used only by the sender
+	fn              uint64
+	buf             []byte
+	isDataFrame     bool
+	retransmissions int
 }
 
 func composeFrame(fn uint64, b []byte) sendFrame {

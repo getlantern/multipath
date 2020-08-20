@@ -9,7 +9,7 @@ import (
 
 func TestRead(t *testing.T) {
 	q := newReceiveQueue(2)
-	fn := uint64(0)
+	fn := uint64(minFrameNumber - 1)
 	addFrame := func(s string) {
 		fn++
 		q.add(frame{fn: fn, bytes: []byte(s)})

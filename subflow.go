@@ -60,9 +60,9 @@ func (sf *subflow) readLoop(expectLeadBytes bool) error {
 			return ErrUnexpectedBondID
 		}
 		sf.emaRTT.UpdateDuration(time.Since(sf.probeStart))
-		// probe immediately so the server can calculate the RTT by taking the
-		// time between echoing lead bytes and receiving probe
-		sf.probe()
+		// pong immediately so the server can calculate the RTT by taking the
+		// time between echoing lead bytes and receiving the pong frame.
+		sf.ack(frameTypePong)
 	}
 	for {
 		sz, err := ReadVarInt(r)
@@ -109,17 +109,12 @@ func (sf *subflow) sendLoop() {
 			sf.muPendingAck.Lock()
 			sf.pendingAck[frame.fn] = now
 			sf.muPendingAck.Unlock()
-			if frame.firstSentAt.IsZero() {
-				frame.firstSentAt = now
-			}
-			if time.Since(frame.firstSentAt) < time.Minute {
-				frameCopy := frame
-				time.AfterFunc(sf.retransTimer(), func() {
-					if sf.isPendingAck(frameCopy.fn) {
-						sf.bc.retransmit(frameCopy)
-					}
-				})
-			}
+			frameCopy := frame // to avoid race
+			time.AfterFunc(sf.retransTimer(), func() {
+				if sf.isPendingAck(frameCopy.fn) {
+					sf.bc.retransmit(frameCopy)
+				}
+			})
 		}
 	}
 }
@@ -135,7 +130,11 @@ func (sf *subflow) ack(fn uint64) {
 }
 
 func (sf *subflow) gotACK(fn uint64) {
-	if fn == 0 && !sf.probeStart.IsZero() {
+	if fn == frameTypePing {
+		sf.ack(frameTypePong)
+		return
+	}
+	if fn == frameTypePong && !sf.probeStart.IsZero() {
 		sf.emaRTT.UpdateDuration(time.Since(sf.probeStart))
 		sf.probeStart = time.Time{}
 		return
@@ -160,7 +159,7 @@ func (sf *subflow) isPendingAck(fn uint64) bool {
 }
 
 func (sf *subflow) probe() {
-	sf.ack(0)
+	sf.ack(frameTypePing)
 	sf.probeStart = time.Now()
 }
 

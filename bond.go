@@ -11,10 +11,11 @@
 //      |  version(1)  |  bond id(8)  |  frames (...)  |
 //       ----------------------------------------------
 //
-// There are two types of frames - data frame and ack frame. Data frame carries
-// application data while ack frame carries acknowledgement to the frame just
-// received. An ack frame with frame number 0 is for probing, so data frame
-// number always starts with 1.
+// There are two types of frames. Data frame carries application data while ack
+// frame carries acknowledgement to the frame just received. Payload size and
+// frame number starts from 1 and uses variable-length integer encoding as
+// described here:
+// https://tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
 //
 //       --------------------------------------------------------
 //      |  payload size(1-8)  |  frame number (1-8)  |  payload  |
@@ -23,6 +24,13 @@
 //       ---------------------------------------
 //      |  00000000  |  ack frame number (1-8)  |
 //       ---------------------------------------
+//
+// Probe frame is a special type of ack frame which has a frame number of 0.
+// It's for updating RTT on inactive subflows and detecting recovered subflows.
+//
+//       -------------------------
+//      |  00000000  |  00000000  |
+//       -------------------------
 
 package bond
 

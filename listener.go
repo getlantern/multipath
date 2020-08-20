@@ -82,7 +82,7 @@ func (bl *bondListener) acceptFrom(l net.Listener) error {
 		bl.bondConns[bondID] = bc
 		newlySeen = true
 	}
-	bc.add(conn)
+	bc.add(conn, false)
 	bl.muBondConns.Unlock()
 	if newlySeen {
 		bl.chNextAccepted <- bc

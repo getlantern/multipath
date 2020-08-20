@@ -2,6 +2,7 @@ package bond
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -9,8 +10,8 @@ import (
 )
 
 type Dialer interface {
-	Label() string
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+	Label() string
 }
 
 type dialer struct {
@@ -23,7 +24,7 @@ func BondDialer(dialers ...Dialer) Dialer {
 	return &dialer{dialers}
 }
 
-// DialContext dials the addr on all dialers and return a bond contains
+// DialContext dials the addr using all dialers and returns a bond contains
 // connections from whatever dialers available.
 func (d *dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	bc := newBondConn(atomic.AddUint64(&nextBondID, 1))
@@ -35,10 +36,14 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 				log.Errorf("failed to dial %v: %v", d.Label(), err)
 				ch <- false
 			}
-			if err := bc.addClientConn(conn); err != nil {
-				log.Errorf("failed to add client conn to %v: %v", d.Label(), err)
+			var leadBytes [1 + 8]byte
+			// version is implicitly set to 0
+			binary.LittleEndian.PutUint64(leadBytes[1:], bc.bondID)
+			if _, err := conn.Write(leadBytes[:]); err != nil {
+				log.Errorf("failed to write lead bytes to %v: %v", d.Label(), err)
 				ch <- false
 			} else {
+				bc.add(conn, true)
 				ch <- true
 			}
 		}(d)

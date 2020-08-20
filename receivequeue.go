@@ -64,6 +64,7 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 			return 0, context.DeadlineExceeded
 		}
 		rq.cond.Wait()
+		log.Tracef("awoke with %v bytes", len(rq.buf[rq.rp].bytes))
 	}
 	totalN := 0
 	for {

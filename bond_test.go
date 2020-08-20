@@ -48,29 +48,24 @@ func TestE2E(t *testing.T) {
 	conn, err := bd.DialContext(context.Background(), "whatever", "whatever")
 	assert.NoError(t, err)
 	b := make([]byte, 4)
-	for i := 0; i < 10; i++ {
-		copy(b, []byte(strconv.Itoa(i)))
-		n, err := conn.Write(b)
-		assert.NoError(t, err)
-		assert.Equal(t, len(b), n)
-		log.Debugf("client written '%v'", string(b))
-		_, err = io.ReadFull(conn, b)
-		assert.NoError(t, err)
-		log.Debugf("client read '%v'", string(b))
+	roundtripTest := func() {
+		for i := 0; i < 10; i++ {
+			copy(b, []byte(strconv.Itoa(i)))
+			n, err := conn.Write(b)
+			assert.NoError(t, err)
+			assert.Equal(t, len(b), n)
+			log.Debugf("client written '%v'", string(b))
+			_, err = io.ReadFull(conn, b)
+			assert.NoError(t, err)
+			log.Debugf("client read '%v'", string(b))
+		}
 	}
+	roundtripTest()
 
-	// for _, d := range dialers {
-	// 	d.(*testDialer).setDelay(time.Hour)
-	// }
-	// for i := 0; i < 10; i++ {
-	// 	copy(b, []byte(strconv.Itoa(i)))
-	// 	n, err := conn.Write(b)
-	// 	assert.NoError(t, err)
-	// 	assert.Equal(t, len(b), n)
-	// 	_, err = io.ReadFull(conn, b)
-	// 	assert.NoError(t, err)
-	// }
-
+	listeners[0].(*testListener).setDelay(time.Hour)
+	roundtripTest()
+	dialers[0].(*testDialer).setDelay(time.Hour)
+	roundtripTest()
 }
 
 type testDialer struct {

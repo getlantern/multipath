@@ -2,7 +2,6 @@ package bond
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -17,7 +16,9 @@ type subflow struct {
 	conn net.Conn
 	bc   *bondConn
 
-	sendQueue    chan frame
+	chClose      chan struct{}
+	closeOnce    sync.Once
+	sendQueue    chan sendFrame
 	pendingAck   map[uint64]time.Time
 	muPendingAck sync.Mutex
 	probeStart   time.Time
@@ -29,7 +30,8 @@ func startSubflow(c net.Conn, bc *bondConn, clientSide bool) *subflow {
 	sf := &subflow{
 		conn:       c,
 		bc:         bc,
-		sendQueue:  make(chan frame),
+		chClose:    make(chan struct{}),
+		sendQueue:  make(chan sendFrame),
 		pendingAck: make(map[uint64]time.Time),
 		probeStart: time.Now(),
 		probeTimer: time.NewTimer(0),
@@ -65,10 +67,12 @@ func (sf *subflow) readLoop(expectLeadBytes bool) error {
 	for {
 		sz, err := ReadVarInt(r)
 		if err != nil {
+			sf.closeSelf()
 			return err
 		}
 		fn, err := ReadVarInt(r)
 		if err != nil {
+			sf.closeSelf()
 			return err
 		}
 		if sz == 0 {
@@ -79,44 +83,31 @@ func (sf *subflow) readLoop(expectLeadBytes bool) error {
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
 			pool.Put(buf)
+			sf.closeSelf()
 			return err
 		}
 		sf.ack(fn)
 		sf.bc.recvQueue.add(frame{fn: fn, bytes: buf})
+		select {
+		case <-sf.chClose:
+			return nil
+		default:
+		}
 	}
-}
-
-func (sf *subflow) writeFrame(frame *frame) (done bool, isDataFrame bool) {
-	sz := len(frame.bytes)
-	buf := pool.Get(8 + 8 + sz)
-	defer pool.Put(buf)
-	b := bytes.NewBuffer(buf[:0])
-	WriteVarInt(b, uint64(sz))
-	WriteVarInt(b, frame.fn)
-	isDataFrame = sz > 0
-	if isDataFrame {
-		b.Write(frame.bytes)
-	}
-	length := b.Len()
-	if _, err := sf.conn.Write(buf[:length]); err != nil {
-		return false, false
-	}
-	log.Tracef("Done writing %v bytes to wire", length)
-	return true, isDataFrame
 }
 
 func (sf *subflow) sendLoop() {
 	for frame := range sf.sendQueue {
-		written, isDataFrame := sf.writeFrame(&frame)
-		if !written {
-			sf.bc.retransmit(&frame)
-			continue
+		n, err := sf.conn.Write(frame.buf)
+		if err != nil {
+			sf.closeSelf()
+			sf.bc.retransmit(frame)
 		}
-		if isDataFrame {
-			fn := frame.fn
+		log.Tracef("Done writing %v bytes to wire", n)
+		if frame.isDataFrame {
 			now := time.Now()
 			sf.muPendingAck.Lock()
-			sf.pendingAck[fn] = now
+			sf.pendingAck[frame.fn] = now
 			sf.muPendingAck.Unlock()
 			if frame.firstSentAt.IsZero() {
 				frame.firstSentAt = now
@@ -124,8 +115,8 @@ func (sf *subflow) sendLoop() {
 			if time.Since(frame.firstSentAt) < time.Minute {
 				frameCopy := frame
 				time.AfterFunc(sf.retransTimer(), func() {
-					if !sf.isAcked(fn) {
-						sf.bc.retransmit(&frameCopy)
+					if sf.isPendingAck(frameCopy.fn) {
+						sf.bc.retransmit(frameCopy)
 					}
 				})
 			}
@@ -135,7 +126,12 @@ func (sf *subflow) sendLoop() {
 
 func (sf *subflow) ack(fn uint64) {
 	log.Tracef("acking frame# %v", fn)
-	_, _ = sf.writeFrame(&frame{fn: fn, bytes: nil})
+	frame := composeFrame(fn, nil)
+	_, err := sf.conn.Write(frame.buf)
+	if err != nil {
+		sf.closeSelf()
+	}
+	pool.Put(frame.buf)
 }
 
 func (sf *subflow) gotACK(fn uint64) {
@@ -156,15 +152,15 @@ func (sf *subflow) gotACK(fn uint64) {
 	sf.muPendingAck.Unlock()
 }
 
-func (sf *subflow) isAcked(fn uint64) bool {
+func (sf *subflow) isPendingAck(fn uint64) bool {
 	sf.muPendingAck.Lock()
 	defer sf.muPendingAck.Unlock()
 	_, found := sf.pendingAck[fn]
-	return !found
+	return found
 }
 
 func (sf *subflow) probe() {
-	_, _ = sf.writeFrame(&frame{fn: 0, bytes: nil})
+	sf.ack(0)
 	sf.probeStart = time.Now()
 }
 
@@ -174,4 +170,13 @@ func (sf *subflow) retransTimer() time.Duration {
 		d = 100 * time.Millisecond
 	}
 	return d
+}
+
+func (sf *subflow) closeSelf() {
+	sf.closeOnce.Do(func() {
+		sf.bc.remove(sf)
+		sf.conn.Close()
+		close(sf.sendQueue)
+		close(sf.chClose)
+	})
 }

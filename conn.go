@@ -26,7 +26,7 @@ func (bc *bondConn) Read(b []byte) (n int, err error) {
 }
 
 func (bc *bondConn) Write(b []byte) (n int, err error) {
-	bc.first().sendQueue <- frame{fn: atomic.AddUint64(&bc.nextFN, 1), bytes: b}
+	bc.first().sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
 	return len(b), nil
 }
 
@@ -74,13 +74,13 @@ func (bc *bondConn) first() *subflow {
 	return bc.subflows[0]
 }
 
-func (bc *bondConn) retransmit(frame *frame) {
+func (bc *bondConn) retransmit(frame sendFrame) {
 	subflows := bc.sortSubflows()
 	for _, sf := range subflows {
 		// choose the first subflow not waiting ack for this frame
-		if sf.isAcked(frame.fn) {
+		if !sf.isPendingAck(frame.fn) {
 			log.Tracef("Resending frame# %v", frame.fn)
-			sf.sendQueue <- *frame
+			sf.sendQueue <- frame
 		}
 	}
 }
@@ -100,4 +100,16 @@ func (bc *bondConn) add(c net.Conn, clientSide bool) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
 	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide))
+}
+
+func (bc *bondConn) remove(theSubflow *subflow) {
+	bc.muSubflows.Lock()
+	defer bc.muSubflows.Unlock()
+	var remains []*subflow
+	for _, sf := range bc.subflows {
+		if sf != theSubflow {
+			remains = append(remains, sf)
+		}
+	}
+	bc.subflows = remains
 }

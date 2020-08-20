@@ -35,10 +35,12 @@
 package bond
 
 import (
+	"bytes"
 	"errors"
 	"time"
 
 	"github.com/getlantern/golog"
+	pool "github.com/libp2p/go-buffer-pool"
 )
 
 var (
@@ -48,7 +50,25 @@ var (
 )
 
 type frame struct {
+	fn    uint64
+	bytes []byte
+}
+
+type sendFrame struct {
 	fn          uint64
-	bytes       []byte
+	buf         []byte
+	isDataFrame bool
 	firstSentAt time.Time // used only by the sender
+}
+
+func composeFrame(fn uint64, b []byte) sendFrame {
+	sz := len(b)
+	buf := pool.Get(8 + 8 + sz)
+	wb := bytes.NewBuffer(buf[:0])
+	WriteVarInt(wb, uint64(sz))
+	WriteVarInt(wb, fn)
+	if sz > 0 {
+		wb.Write(b)
+	}
+	return sendFrame{fn: fn, buf: wb.Bytes(), isDataFrame: sz > 0}
 }

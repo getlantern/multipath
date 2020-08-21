@@ -54,12 +54,12 @@ func (sf *subflow) readLoop() error {
 	for {
 		sz, err := ReadVarInt(r)
 		if err != nil {
-			sf.closeSelf()
+			sf.close()
 			return err
 		}
 		fn, err := ReadVarInt(r)
 		if err != nil {
-			sf.closeSelf()
+			sf.close()
 			return err
 		}
 		if sz == 0 {
@@ -70,7 +70,7 @@ func (sf *subflow) readLoop() error {
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
 			pool.Put(buf)
-			sf.closeSelf()
+			sf.close()
 			return err
 		}
 		sf.ack(fn)
@@ -87,7 +87,7 @@ func (sf *subflow) sendLoop() {
 	for frame := range sf.sendQueue {
 		n, err := sf.conn.Write(frame.buf)
 		if err != nil {
-			sf.closeSelf()
+			sf.close()
 			sf.bc.retransmit(frame)
 		}
 		log.Tracef("Done writing %v bytes to wire", n)
@@ -111,7 +111,7 @@ func (sf *subflow) ack(fn uint64) {
 	frame := composeFrame(fn, nil)
 	_, err := sf.conn.Write(frame.buf)
 	if err != nil {
-		sf.closeSelf()
+		sf.close()
 	}
 	pool.Put(frame.buf)
 }
@@ -159,7 +159,7 @@ func (sf *subflow) retransTimer() time.Duration {
 	return d
 }
 
-func (sf *subflow) closeSelf() {
+func (sf *subflow) close() {
 	sf.closeOnce.Do(func() {
 		sf.bc.remove(sf)
 		sf.conn.Close()

@@ -35,7 +35,7 @@ func (bc *bondConn) Close() error {
 	bc.muSubflows.RLock()
 	defer bc.muSubflows.RUnlock()
 	for _, sf := range bc.subflows {
-		sf.conn.Close()
+		sf.close()
 	}
 	return nil
 }

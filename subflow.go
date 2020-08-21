@@ -2,7 +2,6 @@ package bond
 
 import (
 	"bufio"
-	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -26,44 +25,32 @@ type subflow struct {
 	emaRTT       *ema.EMA
 }
 
-func startSubflow(c net.Conn, bc *bondConn, clientSide bool) *subflow {
+func startSubflow(c net.Conn, bc *bondConn, clientSide bool, probeStart time.Time) *subflow {
 	sf := &subflow{
 		conn:       c,
 		bc:         bc,
 		chClose:    make(chan struct{}),
 		sendQueue:  make(chan sendFrame),
 		pendingAck: make(map[uint64]time.Time),
-		probeStart: time.Now(),
 		probeTimer: time.NewTimer(0),
 		emaRTT:     ema.NewDuration(time.Second, 0.1)}
+	if clientSide {
+		sf.emaRTT.SetDuration(time.Since(probeStart))
+		// pong immediately so the server can calculate the RTT between when it
+		// sends the leading bytes and receives the pong frame.
+		sf.ack(frameTypePong)
+	} else {
+		sf.probeStart = probeStart
+	}
 	go func() {
-		log.Error(sf.readLoop(clientSide))
+		log.Error(sf.readLoop())
 	}()
 	go sf.sendLoop()
 	return sf
 }
 
-func (sf *subflow) readLoop(expectLeadBytes bool) error {
+func (sf *subflow) readLoop() error {
 	r := bufio.NewReader(sf.conn)
-	if expectLeadBytes {
-		var leadBytes [1 + 8]byte
-		_, err := io.ReadFull(r, leadBytes[:])
-		if err != nil {
-			return err
-		}
-		version := uint8(leadBytes[0])
-		if uint8(version) != 0 {
-			return ErrUnexpectedVersion
-		}
-		bondID := binary.LittleEndian.Uint64(leadBytes[1:])
-		if bondID != sf.bc.bondID {
-			return ErrUnexpectedBondID
-		}
-		sf.emaRTT.UpdateDuration(time.Since(sf.probeStart))
-		// pong immediately so the server can calculate the RTT by taking the
-		// time between echoing lead bytes and receiving the pong frame.
-		sf.ack(frameTypePong)
-	}
 	for {
 		sz, err := ReadVarInt(r)
 		if err != nil {
@@ -141,14 +128,15 @@ func (sf *subflow) gotACK(fn uint64) {
 	}
 	log.Tracef("Got ack for frame# %v", fn)
 	sf.muPendingAck.Lock()
+	defer sf.muPendingAck.Unlock()
 	sendTime, found := sf.pendingAck[fn]
 	if found {
 		// it's okay to calculate RTT this way because ack frame is always sent
-		// back through the same subflow.
+		// back through the same subflow, and a data frame is never sent over
+		// the same subflow more than once.
 		sf.emaRTT.UpdateDuration(time.Since(sendTime))
 		delete(sf.pendingAck, fn)
 	}
-	sf.muPendingAck.Unlock()
 }
 
 func (sf *subflow) isPendingAck(fn uint64) bool {

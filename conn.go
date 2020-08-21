@@ -102,10 +102,10 @@ func (bc *bondConn) sortSubflows() []*subflow {
 	return subflowsCopy
 }
 
-func (bc *bondConn) add(c net.Conn, clientSide bool) {
+func (bc *bondConn) add(c net.Conn, clientSide bool, probeStart time.Time) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
-	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide))
+	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart))
 }
 
 func (bc *bondConn) remove(theSubflow *subflow) {

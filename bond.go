@@ -1,19 +1,20 @@
-// Package bond provide a simply way to bond multiple net.Conn to a single one.
-//
-// Definitions:
-//
-// - subflow: The byte stream on one of the connections belonging to the bond.
-//
-// Each subflow is a bidirectional byte stream in the following form until the
-// connection ends.
+// Package bond provides a simply way to bond multiple connections (subflows)
+// together to a single one for throughput and reliability.
+////
+// Each subflow is a bidirectional byte stream each side in the following form
+// until the connection ends. When establishing the very first subflow, the
+// client sends an all-zero bond ID and server assigns a bond ID and sends it
+// it back. Subsequent subflows all use the same bond ID.
 //
 //       ----------------------------------------------
 //      |  version(1)  |  bond id(8)  |  frames (...)  |
 //       ----------------------------------------------
 //
 // There are two types of frames. Data frame carries application data while ack
-// frame carries acknowledgement to the frame just received. Payload size and
-// frame number uses variable-length integer encoding as described here:
+// frame carries acknowledgement to the frame just received. When one data
+// frame is not acked in time, bond tries to send the data frame via another
+// subflow, until all subflows have been tried. Payload size and frame number
+// uses variable-length integer encoding as described here:
 // https://tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
 //
 //       --------------------------------------------------------
@@ -25,8 +26,8 @@
 //       ---------------------------------------
 //
 // Ack frames with frame number < 10 are reserved for control. For now only 0
-// and 1 are used, for ping and pong frame respectively.  They are used to
-// update RTT on inactive subflows and detect recovered subflows.
+// and 1 are used, for ping and pong frame respectively. They are for updating
+// RTT on inactive subflows and detecting recovered subflows.
 //
 // Ping frame:
 //       -------------------------

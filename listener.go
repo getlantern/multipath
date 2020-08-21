@@ -6,9 +6,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type bondListener struct {
+	nextBondID     uint64
 	listeners      []net.Listener
 	bondConns      map[uint64]*bondConn
 	muBondConns    sync.Mutex
@@ -68,24 +71,39 @@ func (bl *bondListener) acceptFrom(l net.Listener) error {
 	if uint8(version) != 0 {
 		return ErrUnexpectedVersion
 	}
+	bondID := binary.LittleEndian.Uint64(leadBytes[1:])
+	var newBond bool
+	if bondID == 0 {
+		newBond = true
+		bondID = atomic.AddUint64(&bl.nextBondID, 1)
+		binary.LittleEndian.PutUint64(leadBytes[1:], bondID)
+		log.Tracef("New bond from %v, assigned bond ID %v", conn.RemoteAddr(), bondID)
+	} else {
+		log.Tracef("New connection of bond ID %v from %v", bondID, conn.RemoteAddr())
+	}
+	probeStart := time.Now()
 	// echo lead bytes back to the client
 	if _, err := conn.Write(leadBytes[:]); err != nil {
 		return err
 	}
-	bondID := binary.LittleEndian.Uint64(leadBytes[1:])
-	log.Tracef("New connection of bond ID %v from %v", bondID, conn.RemoteAddr())
-	var newlySeen bool
+	var bc *bondConn
 	bl.muBondConns.Lock()
-	bc := bl.bondConns[bondID]
-	if bc == nil {
+	if newBond {
 		bc = newBondConn(bondID)
 		bl.bondConns[bondID] = bc
-		newlySeen = true
+	} else {
+		bc = bl.bondConns[bondID]
 	}
-	bc.add(conn, false)
 	bl.muBondConns.Unlock()
-	if newlySeen {
+	bc.add(conn, false, probeStart)
+	if newBond {
 		bl.chNextAccepted <- bc
 	}
 	return nil
+}
+
+func (bl *bondListener) remove(bondID uint64) {
+	bl.muBondConns.Lock()
+	delete(bl.bondConns, bondID)
+	bl.muBondConns.Unlock()
 }

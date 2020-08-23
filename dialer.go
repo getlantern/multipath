@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"context"
@@ -15,33 +15,33 @@ type Dialer interface {
 	Label() string
 }
 
-type bondDialer struct {
+type mpDialer struct {
 	dialers []Dialer
 }
 
-func BondDialer(dialers ...Dialer) Dialer {
-	return &bondDialer{dialers}
+func MPDialer(dialers ...Dialer) Dialer {
+	return &mpDialer{dialers}
 }
 
-// DialContext dials the addr using all dialers and returns a bond contains
-// connections from whatever dialers available.
-func (bd *bondDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	for i, d := range bd.dialers {
+// DialContext dials the addr using all dialers and returns a connection
+// contains subflows from whatever dialers available.
+func (mpd *mpDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	for i, d := range mpd.dialers {
 		conn, err := d.DialContext(ctx, network, addr)
 		if err != nil {
 			log.Errorf("failed to dial %v: %v", d.Label(), err)
 			continue
 		}
 		probeStart := time.Now()
-		bondID, err := bd.handshake(conn, 0)
+		cid, err := mpd.handshake(conn, 0)
 		if err != nil {
 			log.Errorf("failed to handshake %v, continuing: %v", d.Label(), err)
 			conn.Close()
 			continue
 		}
-		bc := newBondConn(bondID)
+		bc := newMPConn(cid)
 		bc.add(conn, true, probeStart)
-		for _, d := range bd.dialers[i:] {
+		for _, d := range mpd.dialers[i:] {
 			go func(d Dialer) {
 				conn, err := d.DialContext(ctx, network, addr)
 				if err != nil {
@@ -49,7 +49,7 @@ func (bd *bondDialer) DialContext(ctx context.Context, network, addr string) (ne
 					return
 				}
 				probeStart := time.Now()
-				_, err = bd.handshake(conn, bondID)
+				_, err = mpd.handshake(conn, cid)
 				if err != nil {
 					log.Errorf("failed to handshake %v, continuing: %v", d.Label(), err)
 					conn.Close()
@@ -63,13 +63,13 @@ func (bd *bondDialer) DialContext(ctx context.Context, network, addr string) (ne
 	return nil, errors.New("no dailer left")
 }
 
-// handshake exchanges version and bondID with the peer and returns the bond ID
+// handshake exchanges version and cid with the peer and returns the connnection ID
 // both end agrees if no error happens.
-func (bd *bondDialer) handshake(conn net.Conn, bondID uint64) (uint64, error) {
+func (mpd *mpDialer) handshake(conn net.Conn, cid uint64) (uint64, error) {
 	var leadBytes [1 + 8]byte
 	// the first byte, version, is implicitly set to 0
-	if bondID != 0 {
-		binary.LittleEndian.PutUint64(leadBytes[1:], bondID)
+	if cid != 0 {
+		binary.LittleEndian.PutUint64(leadBytes[1:], cid)
 	}
 	_, err := conn.Write(leadBytes[:])
 	if err != nil {
@@ -83,13 +83,13 @@ func (bd *bondDialer) handshake(conn net.Conn, bondID uint64) (uint64, error) {
 	if uint8(version) != 0 {
 		return 0, ErrUnexpectedVersion
 	}
-	newBondID := binary.LittleEndian.Uint64(leadBytes[1:])
-	if bondID != 0 && bondID != newBondID {
-		return 0, ErrUnexpectedBondID
+	newCID := binary.LittleEndian.Uint64(leadBytes[1:])
+	if cid != 0 && cid != newCID {
+		return 0, ErrUnexpectedCID
 	}
-	return newBondID, nil
+	return newCID, nil
 }
 
-func (bd *bondDialer) Label() string {
-	return fmt.Sprintf("bond dialer with %d dialers", len(bd.dialers))
+func (mpd *mpDialer) Label() string {
+	return fmt.Sprintf("multipath dialer with %d dialers", len(mpd.dialers))
 }

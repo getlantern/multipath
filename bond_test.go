@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"context"
@@ -24,8 +24,8 @@ func TestE2E(t *testing.T) {
 			dialers = append(dialers, &testDialer{0, "tcp", l.Addr().String()})
 		}
 	}
-	bl := BondListener(listeners...)
-	bd := BondDialer(dialers...)
+	bl := MPListener(listeners...)
+	bd := MPDialer(dialers...)
 
 	go func() {
 		for {

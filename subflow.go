@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 
 type subflow struct {
 	conn net.Conn
-	bc   *bondConn
+	bc   *mpConn
 
 	chClose      chan struct{}
 	closeOnce    sync.Once
@@ -25,7 +25,7 @@ type subflow struct {
 	emaRTT       *ema.EMA
 }
 
-func startSubflow(c net.Conn, bc *bondConn, clientSide bool, probeStart time.Time) *subflow {
+func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time) *subflow {
 	sf := &subflow{
 		conn:       c,
 		bc:         bc,

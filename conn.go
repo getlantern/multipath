@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"net"
@@ -8,30 +8,30 @@ import (
 	"time"
 )
 
-type bondConn struct {
-	bondID     uint64
+type mpConn struct {
+	cid     uint64
 	nextFN     uint64
 	subflows   []*subflow
 	muSubflows sync.RWMutex
 	recvQueue  *receiveQueue
 }
 
-func newBondConn(bondID uint64) *bondConn {
-	return &bondConn{bondID: bondID,
+func newMPConn(cid uint64) *mpConn {
+	return &mpConn{cid: cid,
 		nextFN:    minFrameNumber - 1,
 		recvQueue: newReceiveQueue(4096),
 	}
 }
-func (bc *bondConn) Read(b []byte) (n int, err error) {
+func (bc *mpConn) Read(b []byte) (n int, err error) {
 	return bc.recvQueue.read(b)
 }
 
-func (bc *bondConn) Write(b []byte) (n int, err error) {
+func (bc *mpConn) Write(b []byte) (n int, err error) {
 	bc.first().sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
 	return len(b), nil
 }
 
-func (bc *bondConn) Close() error {
+func (bc *mpConn) Close() error {
 	bc.muSubflows.RLock()
 	defer bc.muSubflows.RUnlock()
 	for _, sf := range bc.subflows {
@@ -40,25 +40,25 @@ func (bc *bondConn) Close() error {
 	return nil
 }
 
-func (bc *bondConn) LocalAddr() net.Addr {
+func (bc *mpConn) LocalAddr() net.Addr {
 	panic("not implemented")
 }
 
-func (bc *bondConn) RemoteAddr() net.Addr {
+func (bc *mpConn) RemoteAddr() net.Addr {
 	panic("not implemented")
 }
 
-func (bc *bondConn) SetDeadline(t time.Time) error {
+func (bc *mpConn) SetDeadline(t time.Time) error {
 	bc.SetReadDeadline(t)
 	return bc.SetWriteDeadline(t)
 }
 
-func (bc *bondConn) SetReadDeadline(t time.Time) error {
+func (bc *mpConn) SetReadDeadline(t time.Time) error {
 	bc.recvQueue.setReadDeadline(t)
 	return nil
 }
 
-func (bc *bondConn) SetWriteDeadline(t time.Time) error {
+func (bc *mpConn) SetWriteDeadline(t time.Time) error {
 	bc.muSubflows.RLock()
 	defer bc.muSubflows.RUnlock()
 	for _, sf := range bc.subflows {
@@ -69,13 +69,13 @@ func (bc *bondConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func (bc *bondConn) first() *subflow {
+func (bc *mpConn) first() *subflow {
 	bc.muSubflows.RLock()
 	defer bc.muSubflows.RUnlock()
 	return bc.subflows[0]
 }
 
-func (bc *bondConn) retransmit(frame sendFrame) {
+func (bc *mpConn) retransmit(frame sendFrame) {
 	subflows := bc.sortSubflows()
 	frame.retransmissions++
 	if frame.retransmissions >= len(subflows)-1 {
@@ -91,7 +91,7 @@ func (bc *bondConn) retransmit(frame sendFrame) {
 	}
 }
 
-func (bc *bondConn) sortSubflows() []*subflow {
+func (bc *mpConn) sortSubflows() []*subflow {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
 	sort.Slice(bc.subflows, func(i, j int) bool {
@@ -102,13 +102,13 @@ func (bc *bondConn) sortSubflows() []*subflow {
 	return subflowsCopy
 }
 
-func (bc *bondConn) add(c net.Conn, clientSide bool, probeStart time.Time) {
+func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
 	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart))
 }
 
-func (bc *bondConn) remove(theSubflow *subflow) {
+func (bc *mpConn) remove(theSubflow *subflow) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
 	var remains []*subflow

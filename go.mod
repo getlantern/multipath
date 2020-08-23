@@ -1,4 +1,4 @@
-module github.com/getlantern/bond
+module github.com/getlantern/multipath
 
 go 1.14
 

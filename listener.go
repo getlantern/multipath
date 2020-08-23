@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"bufio"
@@ -10,42 +10,42 @@ import (
 	"time"
 )
 
-type bondListener struct {
-	nextBondID     uint64
+type mpListener struct {
+	nextCID        uint64
 	listeners      []net.Listener
-	bondConns      map[uint64]*bondConn
-	muBondConns    sync.Mutex
+	mpConns        map[uint64]*mpConn
+	muMPConns    sync.Mutex
 	chNextAccepted chan net.Conn
 	startOnce      sync.Once
 	chClose        chan struct{}
 	closeOnce      sync.Once
 }
 
-func BondListener(ls ...net.Listener) *bondListener {
-	return &bondListener{listeners: ls, bondConns: make(map[uint64]*bondConn), chNextAccepted: make(chan net.Conn), chClose: make(chan struct{})}
+func MPListener(ls ...net.Listener) *mpListener {
+	return &mpListener{listeners: ls, mpConns: make(map[uint64]*mpConn), chNextAccepted: make(chan net.Conn), chClose: make(chan struct{})}
 }
 
-func (bl *bondListener) Accept() (net.Conn, error) {
-	bl.startOnce.Do(bl.start)
-	return <-bl.chNextAccepted, nil
+func (mpl *mpListener) Accept() (net.Conn, error) {
+	mpl.startOnce.Do(mpl.start)
+	return <-mpl.chNextAccepted, nil
 }
 
-func (bl *bondListener) Close() error {
-	bl.closeOnce.Do(func() { close(bl.chClose) })
+func (mpl *mpListener) Close() error {
+	mpl.closeOnce.Do(func() { close(mpl.chClose) })
 	return nil
 }
 
-func (bl *bondListener) Addr() net.Addr {
+func (mpl *mpListener) Addr() net.Addr {
 	panic("not implemented")
 }
 
-func (bl *bondListener) start() {
-	for _, l := range bl.listeners {
+func (mpl *mpListener) start() {
+	for _, l := range mpl.listeners {
 		go func(l net.Listener) {
 			for {
-				if err := bl.acceptFrom(l); err != nil {
+				if err := mpl.acceptFrom(l); err != nil {
 					select {
-					case <-bl.chClose:
+					case <-mpl.chClose:
 						return
 					default:
 						log.Debugf("failed to accept from %v: %v", l.Addr(), err)
@@ -56,7 +56,7 @@ func (bl *bondListener) start() {
 	}
 }
 
-func (bl *bondListener) acceptFrom(l net.Listener) error {
+func (mpl *mpListener) acceptFrom(l net.Listener) error {
 	conn, err := l.Accept()
 	if err != nil {
 		return err
@@ -71,39 +71,39 @@ func (bl *bondListener) acceptFrom(l net.Listener) error {
 	if uint8(version) != 0 {
 		return ErrUnexpectedVersion
 	}
-	bondID := binary.LittleEndian.Uint64(leadBytes[1:])
-	var newBond bool
-	if bondID == 0 {
-		newBond = true
-		bondID = atomic.AddUint64(&bl.nextBondID, 1)
-		binary.LittleEndian.PutUint64(leadBytes[1:], bondID)
-		log.Tracef("New bond from %v, assigned bond ID %v", conn.RemoteAddr(), bondID)
+	cid := binary.LittleEndian.Uint64(leadBytes[1:])
+	var newConn bool
+	if cid == 0 {
+		newConn = true
+		cid = atomic.AddUint64(&mpl.nextCID, 1)
+		binary.LittleEndian.PutUint64(leadBytes[1:], cid)
+		log.Tracef("New connection from %v, assigned CID %v", conn.RemoteAddr(), cid)
 	} else {
-		log.Tracef("New connection of bond ID %v from %v", bondID, conn.RemoteAddr())
+		log.Tracef("New subflow of CID %v from %v", cid, conn.RemoteAddr())
 	}
 	probeStart := time.Now()
 	// echo lead bytes back to the client
 	if _, err := conn.Write(leadBytes[:]); err != nil {
 		return err
 	}
-	var bc *bondConn
-	bl.muBondConns.Lock()
-	if newBond {
-		bc = newBondConn(bondID)
-		bl.bondConns[bondID] = bc
+	var bc *mpConn
+	mpl.muMPConns.Lock()
+	if newConn {
+		bc = newMPConn(cid)
+		mpl.mpConns[cid] = bc
 	} else {
-		bc = bl.bondConns[bondID]
+		bc = mpl.mpConns[cid]
 	}
-	bl.muBondConns.Unlock()
+	mpl.muMPConns.Unlock()
 	bc.add(conn, false, probeStart)
-	if newBond {
-		bl.chNextAccepted <- bc
+	if newConn {
+		mpl.chNextAccepted <- bc
 	}
 	return nil
 }
 
-func (bl *bondListener) remove(bondID uint64) {
-	bl.muBondConns.Lock()
-	delete(bl.bondConns, bondID)
-	bl.muBondConns.Unlock()
+func (mpl *mpListener) remove(cid uint64) {
+	mpl.muMPConns.Lock()
+	delete(mpl.mpConns, cid)
+	mpl.muMPConns.Unlock()
 }

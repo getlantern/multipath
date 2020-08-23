@@ -1,21 +1,25 @@
-// Package bond provides a simply way to bond multiple connections (subflows)
-// together to a single one for throughput and reliability.
-////
-// Each subflow is a bidirectional byte stream each side in the following form
-// until the connection ends. When establishing the very first subflow, the
-// client sends an all-zero bond ID and server assigns a bond ID and sends it
-// it back. Subsequent subflows all use the same bond ID.
+// Package multipath provides a simple way to bond multiple network paths
+// between a pair of hosts to form a single connection from the upper layer
+// perspective, for throughput and resilience.
 //
-//       ----------------------------------------------
-//      |  version(1)  |  bond id(8)  |  frames (...)  |
-//       ----------------------------------------------
+// The term connection, path and subflow used here is the same as mentioned in
+// MP-TCP https://www.rfc-editor.org/rfc/rfc8684.html#name-terminology
+//
+// Each subflow is a bidirectional byte stream each side in the following form
+// until being disrupted or the connection ends. When establishing the very
+// first subflow, the client sends an all-zero connnection ID (CID) and the
+// server sends the assigned CID back. Subsequent subflows use the same CID.
+//
+//       ----------------------------------------------------
+//      |  version(1)  |  cid(8)  |  frames (...)  |
+//       ----------------------------------------------------
 //
 // There are two types of frames. Data frame carries application data while ack
 // frame carries acknowledgement to the frame just received. When one data
-// frame is not acked in time, bond tries to send the data frame via another
-// subflow, until all subflows have been tried. Payload size and frame number
-// uses variable-length integer encoding as described here:
-// https://tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
+// frame is not acked in time, it is sent over another subflow, until all
+// available subflows have been tried. Payload size and frame number uses
+// variable-length integer encoding as described here: https:
+// //tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
 //
 //       --------------------------------------------------------
 //      |  payload size(1-8)  |  frame number (1-8)  |  payload  |
@@ -38,8 +42,9 @@
 //       -------------------------
 //      |  00000000  |  00000001  |
 //       -------------------------
+//
 
-package bond
+package multipath
 
 import (
 	"bytes"
@@ -57,8 +62,8 @@ const (
 
 var (
 	ErrUnexpectedVersion = errors.New("unexpected version")
-	ErrUnexpectedBondID  = errors.New("unexpected bond ID")
-	log                  = golog.LoggerFor("bond")
+	ErrUnexpectedCID     = errors.New("unexpected connnection ID")
+	log                  = golog.LoggerFor("multipath")
 )
 
 type frame struct {

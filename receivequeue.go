@@ -1,4 +1,4 @@
-package bond
+package multipath
 
 import (
 	"context"

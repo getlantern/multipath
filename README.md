@@ -1,2 +1,2 @@
-# bond
-Bond multiple connections for throughput and reliability.
+# Multipath
+Bond multiple paths for throughput and resilience.

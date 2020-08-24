@@ -14,14 +14,14 @@ type mpListener struct {
 	nextCID        uint64
 	listeners      []net.Listener
 	mpConns        map[uint64]*mpConn
-	muMPConns    sync.Mutex
+	muMPConns      sync.Mutex
 	chNextAccepted chan net.Conn
 	startOnce      sync.Once
 	chClose        chan struct{}
 	closeOnce      sync.Once
 }
 
-func MPListener(ls ...net.Listener) *mpListener {
+func MPListener(ls ...net.Listener) net.Listener {
 	return &mpListener{listeners: ls, mpConns: make(map[uint64]*mpConn), chNextAccepted: make(chan net.Conn), chClose: make(chan struct{})}
 }
 
@@ -35,8 +35,10 @@ func (mpl *mpListener) Close() error {
 	return nil
 }
 
+// Addr satisfies the net.Listener interface. It returns the zero value of
+// net.IPAddr.
 func (mpl *mpListener) Addr() net.Addr {
-	panic("not implemented")
+	return &net.IPAddr{}
 }
 
 func (mpl *mpListener) start() {

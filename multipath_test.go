@@ -45,7 +45,7 @@ func TestE2E(t *testing.T) {
 			}()
 		}
 	}()
-	conn, err := bd.DialContext(context.Background(), "whatever", "whatever")
+	conn, err := bd.DialContext(context.Background())
 	assert.NoError(t, err)
 	b := make([]byte, 4)
 	roundtripTest := func() {
@@ -73,7 +73,7 @@ type testDialer struct {
 	network, addr string
 }
 
-func (td *testDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+func (td *testDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, td.network, td.addr)
 	if err != nil {

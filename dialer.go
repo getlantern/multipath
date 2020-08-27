@@ -11,7 +11,7 @@ import (
 )
 
 type Dialer interface {
-	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+	DialContext(ctx context.Context) (net.Conn, error)
 	Label() string
 }
 
@@ -25,9 +25,9 @@ func MPDialer(dialers ...Dialer) Dialer {
 
 // DialContext dials the addr using all dialers and returns a connection
 // contains subflows from whatever dialers available.
-func (mpd *mpDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	for i, d := range mpd.dialers {
-		conn, err := d.DialContext(ctx, network, addr)
+		conn, err := d.DialContext(ctx)
 		if err != nil {
 			log.Errorf("failed to dial %v: %v", d.Label(), err)
 			continue
@@ -43,7 +43,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context, network, addr string) (net
 		bc.add(conn, true, probeStart)
 		for _, d := range mpd.dialers[i:] {
 			go func(d Dialer) {
-				conn, err := d.DialContext(ctx, network, addr)
+				conn, err := d.DialContext(ctx)
 				if err != nil {
 					log.Errorf("failed to dial %v: %v", d.Label(), err)
 					return

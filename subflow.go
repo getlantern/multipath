@@ -11,33 +11,40 @@ import (
 	pool "github.com/libp2p/go-buffer-pool"
 )
 
+type pendingAck struct {
+	sz     int
+	sentAt time.Time
+}
 type subflow struct {
 	to   string
 	conn net.Conn
 	bc   *mpConn
 
-	chClose      chan struct{}
-	closeOnce    sync.Once
-	sendQueue    chan sendFrame
-	pendingAck   map[uint64]time.Time
-	muPendingAck sync.Mutex
-	probeStart   time.Time
-	probeTimer   *time.Timer
-	emaRTT       *ema.EMA
+	chClose       chan struct{}
+	closeOnce     sync.Once
+	sendQueue     chan sendFrame
+	pendingAcks   map[uint64]pendingAck
+	muPendingAcks sync.Mutex
+	probeStart    time.Time
+	emaRTT        *ema.EMA
+	rttUpdater    func(time.Duration)
 }
 
-func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time) *subflow {
+func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time, rttUpdater func(time.Duration)) *subflow {
 	sf := &subflow{
-		to:         c.RemoteAddr().String(),
-		conn:       c,
-		bc:         bc,
-		chClose:    make(chan struct{}),
-		sendQueue:  make(chan sendFrame),
-		pendingAck: make(map[uint64]time.Time),
-		probeTimer: time.NewTimer(0),
-		emaRTT:     ema.NewDuration(time.Second, 0.1)}
+		to:          c.RemoteAddr().String(),
+		conn:        c,
+		bc:          bc,
+		chClose:     make(chan struct{}),
+		sendQueue:   make(chan sendFrame),
+		pendingAcks: make(map[uint64]pendingAck),
+		emaRTT:      ema.NewDuration(time.Second, 0.1),
+		rttUpdater:  rttUpdater,
+	}
 	if clientSide {
-		sf.emaRTT.SetDuration(time.Since(probeStart))
+		initialRTT := time.Since(probeStart)
+		rttUpdater(initialRTT)
+		sf.emaRTT.SetDuration(initialRTT)
 		// pong immediately so the server can calculate the RTT between when it
 		// sends the leading bytes and receives the pong frame.
 		sf.ack(frameTypePong)
@@ -53,36 +60,56 @@ func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time)
 	return sf
 }
 
-func (sf *subflow) readLoop() error {
+func (sf *subflow) readLoop() (err error) {
+	ch := make(chan *frame)
 	r := bufio.NewReader(sf.conn)
+	go func() {
+		defer close(ch)
+		for {
+			sz, err := ReadVarInt(r)
+			if err != nil {
+				sf.close()
+				return
+			}
+			fn, err := ReadVarInt(r)
+			if err != nil {
+				sf.close()
+				return
+			}
+			if sz == 0 {
+				sf.gotACK(fn)
+				continue
+			}
+			buf := pool.Get(int(sz))
+			_, err = io.ReadFull(r, buf)
+			if err != nil {
+				pool.Put(buf)
+				sf.close()
+				return
+			}
+			sf.ack(fn)
+			ch <- &frame{fn: fn, bytes: buf}
+			select {
+			case <-sf.chClose:
+				return
+			default:
+			}
+		}
+	}()
+	probeTimer := time.NewTimer(probeInterval)
 	for {
-		sz, err := ReadVarInt(r)
-		if err != nil {
-			sf.close()
-			return err
-		}
-		fn, err := ReadVarInt(r)
-		if err != nil {
-			sf.close()
-			return err
-		}
-		if sz == 0 {
-			sf.gotACK(fn)
-			continue
-		}
-		buf := pool.Get(int(sz))
-		_, err = io.ReadFull(r, buf)
-		if err != nil {
-			pool.Put(buf)
-			sf.close()
-			return err
-		}
-		sf.ack(fn)
-		sf.bc.recvQueue.add(frame{fn: fn, bytes: buf})
 		select {
-		case <-sf.chClose:
-			return nil
-		default:
+		case frame := <-ch:
+			if frame == nil {
+				return
+			}
+			sf.bc.recvQueue.add(frame)
+			if !probeTimer.Stop() {
+				<-probeTimer.C
+			}
+			probeTimer.Reset(probeInterval)
+		case <-probeTimer.C:
+			sf.probe()
 		}
 	}
 }
@@ -98,9 +125,9 @@ func (sf *subflow) sendLoop() {
 		log.Tracef("Done writing %v bytes to wire", n)
 		if frame.isDataFrame {
 			now := time.Now()
-			sf.muPendingAck.Lock()
-			sf.pendingAck[frame.fn] = now
-			sf.muPendingAck.Unlock()
+			sf.muPendingAcks.Lock()
+			sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
+			sf.muPendingAcks.Unlock()
 			frameCopy := frame // to avoid race
 			time.AfterFunc(sf.retransTimer(), func() {
 				if sf.isPendingAck(frameCopy.fn) {
@@ -127,27 +154,31 @@ func (sf *subflow) gotACK(fn uint64) {
 		return
 	}
 	if fn == frameTypePong && !sf.probeStart.IsZero() {
-		sf.emaRTT.UpdateDuration(time.Since(sf.probeStart))
+		rtt := time.Since(sf.probeStart)
+		sf.rttUpdater(rtt)
+		sf.emaRTT.UpdateDuration(rtt)
 		sf.probeStart = time.Time{}
 		return
 	}
 	log.Tracef("Got ack for frame# %v", fn)
-	sf.muPendingAck.Lock()
-	defer sf.muPendingAck.Unlock()
-	sendTime, found := sf.pendingAck[fn]
-	if found {
+	sf.muPendingAcks.Lock()
+	defer sf.muPendingAcks.Unlock()
+	pendingAck, found := sf.pendingAcks[fn]
+	if found && pendingAck.sz < maxFrameSizeToCalculateRTT {
 		// it's okay to calculate RTT this way because ack frame is always sent
 		// back through the same subflow, and a data frame is never sent over
 		// the same subflow more than once.
-		sf.emaRTT.UpdateDuration(time.Since(sendTime))
-		delete(sf.pendingAck, fn)
+		rtt := time.Since(pendingAck.sentAt)
+		sf.rttUpdater(rtt)
+		sf.emaRTT.UpdateDuration(rtt)
+		delete(sf.pendingAcks, fn)
 	}
 }
 
 func (sf *subflow) isPendingAck(fn uint64) bool {
-	sf.muPendingAck.Lock()
-	defer sf.muPendingAck.Unlock()
-	_, found := sf.pendingAck[fn]
+	sf.muPendingAcks.Lock()
+	defer sf.muPendingAcks.Unlock()
+	_, found := sf.pendingAcks[fn]
 	return found
 }
 

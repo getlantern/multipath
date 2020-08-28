@@ -35,13 +35,13 @@ func newReceiveQueue(size int) *receiveQueue {
 	return rq
 }
 
-func (rq *receiveQueue) add(f frame) {
+func (rq *receiveQueue) add(f *frame) {
 	idx := f.fn % rq.size
 	rq.cond.L.Lock()
 	defer rq.cond.L.Unlock()
 	if rq.buf[idx].bytes == nil {
 		// empty slot
-		rq.buf[idx] = f
+		rq.buf[idx] = *f
 		if idx == rq.rp {
 			// wake up one waiting reader, if any
 			rq.cond.Signal()

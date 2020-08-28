@@ -47,17 +47,20 @@
 package multipath
 
 import (
-	"bytes"
 	"errors"
+	"time"
 
 	"github.com/getlantern/golog"
-	pool "github.com/libp2p/go-buffer-pool"
 )
 
 const (
 	minFrameNumber uint64 = 10
 	frameTypePing  uint64 = 0
 	frameTypePong  uint64 = 1
+
+	maxFrameSizeToCalculateRTT int = 1500
+	recieveQueueLength             = 4096
+	probeInterval                  = time.Minute
 )
 
 var (
@@ -77,16 +80,4 @@ type sendFrame struct {
 	buf             []byte
 	isDataFrame     bool
 	retransmissions int
-}
-
-func composeFrame(fn uint64, b []byte) sendFrame {
-	sz := len(b)
-	buf := pool.Get(8 + 8 + sz)
-	wb := bytes.NewBuffer(buf[:0])
-	WriteVarInt(wb, uint64(sz))
-	WriteVarInt(wb, fn)
-	if sz > 0 {
-		wb.Write(b)
-	}
-	return sendFrame{fn: fn, buf: wb.Bytes(), isDataFrame: sz > 0}
 }

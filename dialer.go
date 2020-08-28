@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"time"
+
+	"github.com/getlantern/ema"
 )
 
 type Dialer interface {
@@ -15,18 +18,37 @@ type Dialer interface {
 	Label() string
 }
 
+type subflowDialer struct {
+	Dialer
+	emaRTT *ema.EMA
+}
+
+func (sfd *subflowDialer) updateRTT(rtt time.Duration) {
+	sfd.emaRTT.UpdateDuration(rtt)
+}
+
 type mpDialer struct {
-	dialers []Dialer
+	dialers []*subflowDialer
 }
 
 func MPDialer(dialers ...Dialer) Dialer {
-	return &mpDialer{dialers}
+	var subflowDialers []*subflowDialer
+	for _, d := range dialers {
+		subflowDialers = append(subflowDialers, &subflowDialer{d, ema.NewDuration(time.Second, 0.1)})
+	}
+	return &mpDialer{subflowDialers}
 }
 
 // DialContext dials the addr using all dialers and returns a connection
 // contains subflows from whatever dialers available.
 func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
-	for i, d := range mpd.dialers {
+	dialersCopy := make([]*subflowDialer, len(mpd.dialers))
+	copy(dialersCopy, mpd.dialers)
+	sort.Slice(dialersCopy, func(i, j int) bool {
+		return dialersCopy[i].emaRTT.GetDuration() > dialersCopy[j].emaRTT.GetDuration()
+	})
+
+	for i, d := range dialersCopy {
 		conn, err := d.DialContext(ctx)
 		if err != nil {
 			log.Errorf("failed to dial %v: %v", d.Label(), err)
@@ -40,9 +62,9 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			continue
 		}
 		bc := newMPConn(cid)
-		bc.add(conn, true, probeStart)
+		bc.add(conn, true, probeStart, d.updateRTT)
 		for _, d := range mpd.dialers[i:] {
-			go func(d Dialer) {
+			go func(d *subflowDialer) {
 				conn, err := d.DialContext(ctx)
 				if err != nil {
 					log.Errorf("failed to dial %v: %v", d.Label(), err)
@@ -55,7 +77,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 					conn.Close()
 					return
 				}
-				bc.add(conn, true, probeStart)
+				bc.add(conn, true, probeStart, d.updateRTT)
 			}(d)
 		}
 		return bc, nil

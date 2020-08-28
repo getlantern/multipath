@@ -1,11 +1,14 @@
 package multipath
 
 import (
+	"bytes"
 	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	pool "github.com/libp2p/go-buffer-pool"
 )
 
 type mpConn struct {
@@ -20,11 +23,23 @@ type mpConn struct {
 func newMPConn(cid uint64) *mpConn {
 	return &mpConn{cid: cid,
 		nextFN:    minFrameNumber - 1,
-		recvQueue: newReceiveQueue(4096),
+		recvQueue: newReceiveQueue(recieveQueueLength),
 	}
 }
 func (bc *mpConn) Read(b []byte) (n int, err error) {
 	return bc.recvQueue.read(b)
+}
+
+func composeFrame(fn uint64, b []byte) sendFrame {
+	sz := len(b)
+	buf := pool.Get(8 + 8 + sz)
+	wb := bytes.NewBuffer(buf[:0])
+	WriteVarInt(wb, uint64(sz))
+	WriteVarInt(wb, fn)
+	if sz > 0 {
+		wb.Write(b)
+	}
+	return sendFrame{fn: fn, buf: wb.Bytes(), isDataFrame: sz > 0}
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
@@ -115,10 +130,10 @@ func (bc *mpConn) sortSubflows() []*subflow {
 	return subflowsCopy
 }
 
-func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time) {
+func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time, rttUpdater func(time.Duration)) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
-	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart))
+	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart, rttUpdater))
 }
 
 func (bc *mpConn) remove(theSubflow *subflow) {

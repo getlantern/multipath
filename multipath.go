@@ -63,6 +63,7 @@ const (
 var (
 	ErrUnexpectedVersion = errors.New("unexpected version")
 	ErrUnexpectedCID     = errors.New("unexpected connnection ID")
+	ErrClosed            = errors.New("closed connection")
 	log                  = golog.LoggerFor("multipath")
 )
 

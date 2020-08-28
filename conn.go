@@ -9,11 +9,12 @@ import (
 )
 
 type mpConn struct {
-	cid     uint64
+	cid        uint64
 	nextFN     uint64
 	subflows   []*subflow
 	muSubflows sync.RWMutex
 	recvQueue  *receiveQueue
+	closed     uint32 // 1 == true, 0 == false
 }
 
 func newMPConn(cid uint64) *mpConn {
@@ -27,11 +28,16 @@ func (bc *mpConn) Read(b []byte) (n int, err error) {
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
+	if atomic.LoadUint32(&bc.closed) == 1 {
+		return 0, ErrClosed
+	}
 	bc.first().sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
 	return len(b), nil
 }
 
 func (bc *mpConn) Close() error {
+	atomic.StoreUint32(&bc.closed, 1)
+	bc.recvQueue.close()
 	bc.muSubflows.RLock()
 	defer bc.muSubflows.RUnlock()
 	for _, sf := range bc.subflows {
@@ -40,12 +46,17 @@ func (bc *mpConn) Close() error {
 	return nil
 }
 
+type fakeAddr struct{}
+
+func (fakeAddr) Network() string { return "multipath" }
+func (fakeAddr) String() string  { return "multipath" }
+
 func (bc *mpConn) LocalAddr() net.Addr {
-	panic("not implemented")
+	return fakeAddr{}
 }
 
 func (bc *mpConn) RemoteAddr() net.Addr {
-	panic("not implemented")
+	return fakeAddr{}
 }
 
 func (bc *mpConn) SetDeadline(t time.Time) error {
@@ -87,8 +98,10 @@ func (bc *mpConn) retransmit(frame sendFrame) {
 		if !sf.isPendingAck(frame.fn) {
 			log.Tracef("Retransmitting frame# %v", frame.fn)
 			sf.sendQueue <- frame
+			return
 		}
 	}
+	log.Debug("No eligible subflow for retransmitting, skipped")
 }
 
 func (bc *mpConn) sortSubflows() []*subflow {
@@ -110,7 +123,6 @@ func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time) {
 
 func (bc *mpConn) remove(theSubflow *subflow) {
 	bc.muSubflows.Lock()
-	defer bc.muSubflows.Unlock()
 	var remains []*subflow
 	for _, sf := range bc.subflows {
 		if sf != theSubflow {
@@ -118,4 +130,9 @@ func (bc *mpConn) remove(theSubflow *subflow) {
 		}
 	}
 	bc.subflows = remains
+	left := len(remains)
+	bc.muSubflows.Unlock()
+	if left == 0 {
+		bc.Close()
+	}
 }

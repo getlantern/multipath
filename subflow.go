@@ -12,6 +12,7 @@ import (
 )
 
 type subflow struct {
+	to   string
 	conn net.Conn
 	bc   *mpConn
 
@@ -27,6 +28,7 @@ type subflow struct {
 
 func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time) *subflow {
 	sf := &subflow{
+		to:         c.RemoteAddr().String(),
 		conn:       c,
 		bc:         bc,
 		chClose:    make(chan struct{}),
@@ -43,7 +45,9 @@ func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time)
 		sf.probeStart = probeStart
 	}
 	go func() {
-		log.Error(sf.readLoop())
+		if err := sf.readLoop(); err != nil {
+			log.Debugf("read loop to %v ended: %v", sf.to, err)
+		}
 	}()
 	go sf.sendLoop()
 	return sf
@@ -87,6 +91,7 @@ func (sf *subflow) sendLoop() {
 	for frame := range sf.sendQueue {
 		n, err := sf.conn.Write(frame.buf)
 		if err != nil {
+			log.Debugf("closing subflow to %v: %v", sf.to, err)
 			sf.close()
 			sf.bc.retransmit(frame)
 		}
@@ -161,6 +166,7 @@ func (sf *subflow) retransTimer() time.Duration {
 
 func (sf *subflow) close() {
 	sf.closeOnce.Do(func() {
+		log.Debugf("closing subflow to %v", sf.to)
 		sf.bc.remove(sf)
 		sf.conn.Close()
 		close(sf.sendQueue)

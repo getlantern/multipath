@@ -3,6 +3,7 @@ package multipath
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pool "github.com/libp2p/go-buffer-pool"
@@ -21,6 +22,7 @@ type receiveQueue struct {
 	rp           uint64
 	cond         *sync.Cond
 	readDeadline time.Time
+	closed       uint32 // 1 == true, 0 == false
 }
 
 func newReceiveQueue(size int) *receiveQueue {
@@ -59,6 +61,9 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 	for {
 		if rq.buf[rq.rp].bytes != nil {
 			break
+		}
+		if atomic.LoadUint32(&rq.closed) == 1 {
+			return 0, ErrClosed
 		}
 		if rq.dlExceeded() {
 			return 0, context.DeadlineExceeded
@@ -108,4 +113,9 @@ func (rq *receiveQueue) setReadDeadline(dl time.Time) {
 
 func (rq *receiveQueue) dlExceeded() bool {
 	return !rq.readDeadline.IsZero() && !rq.readDeadline.After(time.Now())
+}
+
+func (rq *receiveQueue) close() {
+	atomic.StoreUint32(&rq.closed, 1)
+	rq.cond.Broadcast()
 }

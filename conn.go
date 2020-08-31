@@ -39,7 +39,7 @@ func composeFrame(fn uint64, b []byte) sendFrame {
 	if sz > 0 {
 		wb.Write(b)
 	}
-	return sendFrame{fn: fn, buf: wb.Bytes(), isDataFrame: sz > 0}
+	return sendFrame{fn: fn, sz: uint64(sz), buf: wb.Bytes()}
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
@@ -130,10 +130,10 @@ func (bc *mpConn) sortSubflows() []*subflow {
 	return subflowsCopy
 }
 
-func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time, rttUpdater func(time.Duration)) {
+func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time, tracker statsTracker) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
-	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart, rttUpdater))
+	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart, tracker))
 }
 
 func (bc *mpConn) remove(theSubflow *subflow) {

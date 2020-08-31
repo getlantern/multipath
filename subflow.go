@@ -18,7 +18,7 @@ type pendingAck struct {
 type subflow struct {
 	to   string
 	conn net.Conn
-	bc   *mpConn
+	mpc  *mpConn
 
 	chClose       chan struct{}
 	closeOnce     sync.Once
@@ -27,23 +27,23 @@ type subflow struct {
 	muPendingAcks sync.Mutex
 	probeStart    time.Time
 	emaRTT        *ema.EMA
-	rttUpdater    func(time.Duration)
+	tracker       statsTracker
 }
 
-func startSubflow(c net.Conn, bc *mpConn, clientSide bool, probeStart time.Time, rttUpdater func(time.Duration)) *subflow {
+func startSubflow(c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker statsTracker) *subflow {
 	sf := &subflow{
 		to:          c.RemoteAddr().String(),
 		conn:        c,
-		bc:          bc,
+		mpc:         mpc,
 		chClose:     make(chan struct{}),
 		sendQueue:   make(chan sendFrame),
 		pendingAcks: make(map[uint64]pendingAck),
 		emaRTT:      ema.NewDuration(time.Second, 0.1),
-		rttUpdater:  rttUpdater,
+		tracker:     tracker,
 	}
 	if clientSide {
 		initialRTT := time.Since(probeStart)
-		rttUpdater(initialRTT)
+		tracker.updateRTT(initialRTT)
 		sf.emaRTT.SetDuration(initialRTT)
 		// pong immediately so the server can calculate the RTT between when it
 		// sends the leading bytes and receives the pong frame.
@@ -89,6 +89,7 @@ func (sf *subflow) readLoop() (err error) {
 			}
 			sf.ack(fn)
 			ch <- &frame{fn: fn, bytes: buf}
+			sf.tracker.onRecv(sz)
 			select {
 			case <-sf.chClose:
 				return
@@ -103,7 +104,7 @@ func (sf *subflow) readLoop() (err error) {
 			if frame == nil {
 				return
 			}
-			sf.bc.recvQueue.add(frame)
+			sf.mpc.recvQueue.add(frame)
 			if !probeTimer.Stop() {
 				<-probeTimer.C
 			}
@@ -120,10 +121,15 @@ func (sf *subflow) sendLoop() {
 		if err != nil {
 			log.Debugf("closing subflow to %v: %v", sf.to, err)
 			sf.close()
-			sf.bc.retransmit(frame)
+			sf.mpc.retransmit(frame)
+		}
+		if frame.retransmissions == 0 {
+			sf.tracker.onSent(frame.sz)
+		} else {
+			sf.tracker.onRetransmit(frame.sz)
 		}
 		log.Tracef("Done writing %v bytes to wire", n)
-		if frame.isDataFrame {
+		if frame.isDataFrame() {
 			now := time.Now()
 			sf.muPendingAcks.Lock()
 			sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
@@ -131,7 +137,7 @@ func (sf *subflow) sendLoop() {
 			frameCopy := frame // to avoid race
 			time.AfterFunc(sf.retransTimer(), func() {
 				if sf.isPendingAck(frameCopy.fn) {
-					sf.bc.retransmit(frameCopy)
+					sf.mpc.retransmit(frameCopy)
 				}
 			})
 		}
@@ -155,7 +161,7 @@ func (sf *subflow) gotACK(fn uint64) {
 	}
 	if fn == frameTypePong && !sf.probeStart.IsZero() {
 		rtt := time.Since(sf.probeStart)
-		sf.rttUpdater(rtt)
+		sf.tracker.updateRTT(rtt)
 		sf.emaRTT.UpdateDuration(rtt)
 		sf.probeStart = time.Time{}
 		return
@@ -169,7 +175,7 @@ func (sf *subflow) gotACK(fn uint64) {
 		// back through the same subflow, and a data frame is never sent over
 		// the same subflow more than once.
 		rtt := time.Since(pendingAck.sentAt)
-		sf.rttUpdater(rtt)
+		sf.tracker.updateRTT(rtt)
 		sf.emaRTT.UpdateDuration(rtt)
 		delete(sf.pendingAcks, fn)
 	}
@@ -198,8 +204,10 @@ func (sf *subflow) retransTimer() time.Duration {
 func (sf *subflow) close() {
 	sf.closeOnce.Do(func() {
 		log.Debugf("closing subflow to %v", sf.to)
-		sf.bc.remove(sf)
+		sf.mpc.remove(sf)
 		sf.conn.Close()
+		// this is okay as the subflow is already removed from the mpConn, so
+		// no one will be sending to sf.sendQueue.
 		close(sf.sendQueue)
 		close(sf.chClose)
 	})

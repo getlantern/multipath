@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/ema"
@@ -18,37 +19,68 @@ type Dialer interface {
 	Label() string
 }
 
-type subflowDialer struct {
-	Dialer
-	emaRTT *ema.EMA
+type Stats interface {
+	FormatStats() (stats []string)
 }
 
+type subflowDialer struct {
+	Dialer
+	label            string
+	dials            uint64
+	successes        uint64
+	framesSent       uint64
+	framesRetransmit uint64
+	framesRecv       uint64
+	bytesSent        uint64
+	bytesRetransmit  uint64
+	bytesRecv        uint64
+	emaRTT           *ema.EMA
+}
+
+func (sfd *subflowDialer) DialContext(ctx context.Context) (net.Conn, error) {
+	conn, err := sfd.Dialer.DialContext(ctx)
+	atomic.AddUint64(&sfd.dials, 1)
+	if err == nil {
+		atomic.AddUint64(&sfd.successes, 1)
+	}
+	return conn, err
+}
+
+func (sfd *subflowDialer) onRecv(n uint64) {
+	atomic.AddUint64(&sfd.framesRecv, 1)
+	atomic.AddUint64(&sfd.bytesRecv, n)
+}
+func (sfd *subflowDialer) onSent(n uint64) {
+	atomic.AddUint64(&sfd.framesSent, 1)
+	atomic.AddUint64(&sfd.bytesSent, n)
+}
+func (sfd *subflowDialer) onRetransmit(n uint64) {
+	atomic.AddUint64(&sfd.framesRetransmit, 1)
+	atomic.AddUint64(&sfd.bytesRetransmit, n)
+}
 func (sfd *subflowDialer) updateRTT(rtt time.Duration) {
 	sfd.emaRTT.UpdateDuration(rtt)
 }
 
 type mpDialer struct {
+	name    string
 	dialers []*subflowDialer
 }
 
-func MPDialer(dialers ...Dialer) Dialer {
+func MPDialer(name string, dialers ...Dialer) Dialer {
 	var subflowDialers []*subflowDialer
 	for _, d := range dialers {
-		subflowDialers = append(subflowDialers, &subflowDialer{d, ema.NewDuration(time.Second, 0.1)})
+		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(time.Second, 0.1)})
 	}
-	return &mpDialer{subflowDialers}
+	d := &mpDialer{name, subflowDialers}
+	return d
 }
 
 // DialContext dials the addr using all dialers and returns a connection
 // contains subflows from whatever dialers available.
 func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
-	dialersCopy := make([]*subflowDialer, len(mpd.dialers))
-	copy(dialersCopy, mpd.dialers)
-	sort.Slice(dialersCopy, func(i, j int) bool {
-		return dialersCopy[i].emaRTT.GetDuration() > dialersCopy[j].emaRTT.GetDuration()
-	})
-
-	for i, d := range dialersCopy {
+	dialers := mpd.sorted()
+	for i, d := range dialers {
 		conn, err := d.DialContext(ctx)
 		if err != nil {
 			log.Errorf("failed to dial %v: %v", d.Label(), err)
@@ -62,8 +94,8 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			continue
 		}
 		bc := newMPConn(cid)
-		bc.add(conn, true, probeStart, d.updateRTT)
-		for _, d := range mpd.dialers[i:] {
+		bc.add(conn, true, probeStart, d)
+		for _, d := range dialers[i:] {
 			go func(d *subflowDialer) {
 				conn, err := d.DialContext(ctx)
 				if err != nil {
@@ -77,7 +109,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 					conn.Close()
 					return
 				}
-				bc.add(conn, true, probeStart, d.updateRTT)
+				bc.add(conn, true, probeStart, d)
 			}(d)
 		}
 		return bc, nil
@@ -113,5 +145,29 @@ func (mpd *mpDialer) handshake(conn net.Conn, cid uint64) (uint64, error) {
 }
 
 func (mpd *mpDialer) Label() string {
-	return fmt.Sprintf("multipath dialer with %d dialers", len(mpd.dialers))
+	return fmt.Sprintf("multipath dialer to %s with %d paths", mpd.name, len(mpd.dialers))
+}
+
+func (mpd *mpDialer) sorted() []*subflowDialer {
+	dialersCopy := make([]*subflowDialer, len(mpd.dialers))
+	copy(dialersCopy, mpd.dialers)
+	sort.Slice(dialersCopy, func(i, j int) bool {
+		return dialersCopy[i].emaRTT.GetDuration() > dialersCopy[j].emaRTT.GetDuration()
+	})
+	return dialersCopy
+}
+
+func (mpd *mpDialer) FormatStats() (stats []string) {
+	for _, d := range mpd.sorted() {
+		dials := atomic.LoadUint64(&d.dials)
+		successes := atomic.LoadUint64(&d.successes)
+		stats = append(stats, fmt.Sprintf("%s  D: %4d  S: %4d  F: %4d  RTT: %4.0fms  SENT: %5d/%7dkB  RECV: %5d/%7dkB  RT: %5d/%7dkB",
+			d.label,
+			dials, successes, dials-successes,
+			d.emaRTT.GetDuration().Seconds()*1000,
+			atomic.LoadUint64(&d.framesSent), atomic.LoadUint64(&d.bytesSent)/1000,
+			atomic.LoadUint64(&d.framesRecv), atomic.LoadUint64(&d.bytesRecv)/1000,
+			atomic.LoadUint64(&d.framesRetransmit), atomic.LoadUint64(&d.bytesRetransmit)/1000))
+	}
+	return
 }

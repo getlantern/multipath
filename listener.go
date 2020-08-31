@@ -97,7 +97,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener) error {
 		bc = mpl.mpConns[cid]
 	}
 	mpl.muMPConns.Unlock()
-	bc.add(conn, false, probeStart, func(time.Duration) {})
+	bc.add(conn, false, probeStart, nullStatsTracker{})
 	if newConn {
 		mpl.chNextAccepted <- bc
 	}

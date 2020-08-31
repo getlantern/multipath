@@ -77,7 +77,25 @@ type frame struct {
 
 type sendFrame struct {
 	fn              uint64
+	sz              uint64
 	buf             []byte
-	isDataFrame     bool
 	retransmissions int
 }
+
+func (f *sendFrame) isDataFrame() bool {
+	return f.sz > 0
+}
+
+type statsTracker interface {
+	onRecv(uint64)
+	onSent(uint64)
+	onRetransmit(uint64)
+	updateRTT(time.Duration)
+}
+
+type nullStatsTracker struct{}
+
+func (t nullStatsTracker) onRecv(uint64)           {}
+func (t nullStatsTracker) onSent(uint64)           {}
+func (t nullStatsTracker) onRetransmit(uint64)     {}
+func (t nullStatsTracker) updateRTT(time.Duration) {}

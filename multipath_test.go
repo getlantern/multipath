@@ -25,7 +25,7 @@ func TestE2E(t *testing.T) {
 		}
 	}
 	bl := MPListener(listeners...)
-	bd := MPDialer(dialers...)
+	bd := MPDialer("endpoint", dialers...)
 
 	go func() {
 		for {

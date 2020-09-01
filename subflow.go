@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/ema"
@@ -25,7 +26,7 @@ type subflow struct {
 	sendQueue     chan sendFrame
 	pendingAcks   map[uint64]pendingAck
 	muPendingAcks sync.Mutex
-	probeStart    time.Time
+	probeStart    atomic.Value // time.Time
 	emaRTT        *ema.EMA
 	tracker       statsTracker
 }
@@ -49,7 +50,7 @@ func startSubflow(c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time
 		// sends the leading bytes and receives the pong frame.
 		sf.ack(frameTypePong)
 	} else {
-		sf.probeStart = probeStart
+		sf.probeStart.Store(probeStart)
 	}
 	go func() {
 		if err := sf.readLoop(); err != nil {
@@ -159,12 +160,17 @@ func (sf *subflow) gotACK(fn uint64) {
 		sf.ack(frameTypePong)
 		return
 	}
-	if fn == frameTypePong && !sf.probeStart.IsZero() {
-		rtt := time.Since(sf.probeStart)
-		sf.tracker.updateRTT(rtt)
-		sf.emaRTT.UpdateDuration(rtt)
-		sf.probeStart = time.Time{}
-		return
+	if fn == frameTypePong {
+		if probeStart := sf.probeStart.Load(); probeStart != nil {
+			start := probeStart.(time.Time)
+			if !start.IsZero() {
+				rtt := time.Since(start)
+				sf.tracker.updateRTT(rtt)
+				sf.emaRTT.UpdateDuration(rtt)
+				sf.probeStart.Store(time.Time{})
+				return
+			}
+		}
 	}
 	log.Tracef("Got ack for frame# %v", fn)
 	sf.muPendingAcks.Lock()
@@ -190,7 +196,7 @@ func (sf *subflow) isPendingAck(fn uint64) bool {
 
 func (sf *subflow) probe() {
 	sf.ack(frameTypePing)
-	sf.probeStart = time.Now()
+	sf.probeStart.Store(time.Now())
 }
 
 func (sf *subflow) retransTimer() time.Duration {
@@ -206,9 +212,9 @@ func (sf *subflow) close() {
 		log.Debugf("closing subflow to %v", sf.to)
 		sf.mpc.remove(sf)
 		sf.conn.Close()
+		close(sf.chClose)
 		// this is okay as the subflow is already removed from the mpConn, so
 		// no one will be sending to sf.sendQueue.
 		close(sf.sendQueue)
-		close(sf.chClose)
 	})
 }

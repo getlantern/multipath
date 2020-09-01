@@ -111,9 +111,13 @@ func (bc *mpConn) retransmit(frame sendFrame) {
 	for _, sf := range subflows {
 		// choose the first subflow not waiting ack for this frame
 		if !sf.isPendingAck(frame.fn) {
-			log.Tracef("Retransmitting frame# %v", frame.fn)
-			sf.sendQueue <- frame
-			return
+			select {
+			case <-sf.chClose:
+				// continue
+			case sf.sendQueue <- frame:
+				log.Tracef("Retransmitted frame# %v via %v", frame.fn, sf.to)
+				return
+			}
 		}
 	}
 	log.Debug("No eligible subflow for retransmitting, skipped")

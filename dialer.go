@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"sort"
 	"sync/atomic"
@@ -28,6 +29,7 @@ type subflowDialer struct {
 	label            string
 	dials            uint64
 	successes        uint64
+	consecSuccesses  uint64
 	framesSent       uint64
 	framesRetransmit uint64
 	framesRecv       uint64
@@ -42,6 +44,11 @@ func (sfd *subflowDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	atomic.AddUint64(&sfd.dials, 1)
 	if err == nil {
 		atomic.AddUint64(&sfd.successes, 1)
+		atomic.AddUint64(&sfd.consecSuccesses, 1)
+	} else {
+		// reset RTT to deprioritize this dialer
+		sfd.emaRTT.SetDuration(longRTT)
+		atomic.StoreUint64(&sfd.consecSuccesses, 0)
 	}
 	return conn, err
 }
@@ -70,7 +77,7 @@ type mpDialer struct {
 func MPDialer(name string, dialers ...Dialer) Dialer {
 	var subflowDialers []*subflowDialer
 	for _, d := range dialers {
-		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(time.Second, 0.1)})
+		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(longRTT, 0.1)})
 	}
 	d := &mpDialer{name, subflowDialers}
 	return d
@@ -94,7 +101,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			continue
 		}
 		bc := newMPConn(cid)
-		bc.add(conn, true, probeStart, d)
+		bc.add(d.label, conn, true, probeStart, d)
 		for _, d := range dialers[i:] {
 			go func(d *subflowDialer) {
 				conn, err := d.DialContext(ctx)
@@ -109,7 +116,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 					conn.Close()
 					return
 				}
-				bc.add(conn, true, probeStart, d)
+				bc.add(d.label, conn, true, probeStart, d)
 			}(d)
 		}
 		return bc, nil
@@ -152,7 +159,13 @@ func (mpd *mpDialer) sorted() []*subflowDialer {
 	dialersCopy := make([]*subflowDialer, len(mpd.dialers))
 	copy(dialersCopy, mpd.dialers)
 	sort.Slice(dialersCopy, func(i, j int) bool {
-		return dialersCopy[i].emaRTT.GetDuration() > dialersCopy[j].emaRTT.GetDuration()
+		it := dialersCopy[i].emaRTT.GetDuration()
+		jt := dialersCopy[j].emaRTT.GetDuration()
+		// basically means both have unknown RTT or fail to dial
+		if it == jt {
+			return rand.Intn(2) > 0
+		}
+		return it < jt
 	})
 	return dialersCopy
 }
@@ -161,9 +174,10 @@ func (mpd *mpDialer) FormatStats() (stats []string) {
 	for _, d := range mpd.sorted() {
 		dials := atomic.LoadUint64(&d.dials)
 		successes := atomic.LoadUint64(&d.successes)
-		stats = append(stats, fmt.Sprintf("%s  D: %4d  S: %4d  F: %4d  RTT: %4.0fms  SENT: %5d/%7dkB  RECV: %5d/%7dkB  RT: %5d/%7dkB",
+		consecSuccesses := atomic.LoadUint64(&d.consecSuccesses)
+		stats = append(stats, fmt.Sprintf("%s  A: %4d  S: %4d(%3d)  F: %4d  RTT: %6.0fms  SENT: %5d/%5dkB  RECV: %5d/%5dkB  RT: %5d/%5dkB",
 			d.label,
-			dials, successes, dials-successes,
+			dials, successes, consecSuccesses, dials-successes,
 			d.emaRTT.GetDuration().Seconds()*1000,
 			atomic.LoadUint64(&d.framesSent), atomic.LoadUint64(&d.bytesSent)/1000,
 			atomic.LoadUint64(&d.framesRecv), atomic.LoadUint64(&d.bytesRecv)/1000,

@@ -61,6 +61,7 @@ const (
 	maxFrameSizeToCalculateRTT int = 1500
 	recieveQueueLength             = 4096
 	probeInterval                  = time.Minute
+	longRTT                        = time.Minute
 )
 
 var (

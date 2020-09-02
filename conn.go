@@ -51,14 +51,16 @@ func (bc *mpConn) Write(b []byte) (n int, err error) {
 }
 
 func (bc *mpConn) Close() error {
-	atomic.StoreUint32(&bc.closed, 1)
-	bc.recvQueue.close()
-	bc.muSubflows.RLock()
-	defer bc.muSubflows.RUnlock()
-	for _, sf := range bc.subflows {
+	bc.close()
+	for _, sf := range bc.sortedSubflows() {
 		sf.close()
 	}
 	return nil
+}
+
+func (bc *mpConn) close() {
+	atomic.StoreUint32(&bc.closed, 1)
+	bc.recvQueue.close()
 }
 
 type fakeAddr struct{}
@@ -102,7 +104,7 @@ func (bc *mpConn) first() *subflow {
 }
 
 func (bc *mpConn) retransmit(frame sendFrame) {
-	subflows := bc.sortSubflows()
+	subflows := bc.sortedSubflows()
 	frame.retransmissions++
 	if frame.retransmissions >= len(subflows)-1 {
 		log.Debugf("Give up retransmitting frame# %v", frame.fn)
@@ -123,21 +125,21 @@ func (bc *mpConn) retransmit(frame sendFrame) {
 	log.Debug("No eligible subflow for retransmitting, skipped")
 }
 
-func (bc *mpConn) sortSubflows() []*subflow {
-	bc.muSubflows.Lock()
-	defer bc.muSubflows.Unlock()
-	sort.Slice(bc.subflows, func(i, j int) bool {
-		return bc.subflows[i].emaRTT.GetDuration() > bc.subflows[j].emaRTT.GetDuration()
+func (bc *mpConn) sortedSubflows() []*subflow {
+	bc.muSubflows.RLock()
+	subflows := make([]*subflow, len(bc.subflows))
+	copy(subflows, bc.subflows)
+	bc.muSubflows.RUnlock()
+	sort.Slice(subflows, func(i, j int) bool {
+		return subflows[i].emaRTT.GetDuration() < subflows[j].emaRTT.GetDuration()
 	})
-	subflowsCopy := make([]*subflow, len(bc.subflows))
-	copy(subflowsCopy, bc.subflows)
-	return subflowsCopy
+	return subflows
 }
 
-func (bc *mpConn) add(c net.Conn, clientSide bool, probeStart time.Time, tracker statsTracker) {
+func (bc *mpConn) add(to string, c net.Conn, clientSide bool, probeStart time.Time, tracker statsTracker) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
-	bc.subflows = append(bc.subflows, startSubflow(c, bc, clientSide, probeStart, tracker))
+	bc.subflows = append(bc.subflows, startSubflow(to, c, bc, clientSide, probeStart, tracker))
 }
 
 func (bc *mpConn) remove(theSubflow *subflow) {
@@ -152,6 +154,6 @@ func (bc *mpConn) remove(theSubflow *subflow) {
 	left := len(remains)
 	bc.muSubflows.Unlock()
 	if left == 0 {
-		bc.Close()
+		bc.close()
 	}
 }

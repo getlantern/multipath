@@ -21,21 +21,36 @@ type receiveQueue struct {
 	// data yet to be read.
 	rp           uint64
 	cond         *sync.Cond
+	condAdd      *sync.Cond
 	readDeadline time.Time
 	closed       uint32 // 1 == true, 0 == false
 }
 
 func newReceiveQueue(size int) *receiveQueue {
 	rq := &receiveQueue{
-		buf:  make([]frame, size),
-		size: uint64(size),
-		rp:   minFrameNumber % uint64(size), // frame number starts with 10, so should the read pointer
-		cond: sync.NewCond(&sync.Mutex{}),
+		buf:     make([]frame, size),
+		size:    uint64(size),
+		rp:      minFrameNumber % uint64(size), // frame number starts with minFrameNumber, so should the read pointer
+		cond:    sync.NewCond(&sync.Mutex{}),
+		condAdd: sync.NewCond(&sync.Mutex{}),
 	}
 	return rq
 }
 
 func (rq *receiveQueue) add(f *frame) {
+	for {
+		if rq.tryAdd(f) {
+			return
+		}
+		log.Error("would override unconsumed frame! wait for available slot")
+		if !rq.waitForSlot() {
+			pool.Put(f.bytes)
+			return
+		}
+	}
+}
+
+func (rq *receiveQueue) tryAdd(f *frame) bool {
 	idx := f.fn % rq.size
 	rq.cond.L.Lock()
 	defer rq.cond.L.Unlock()
@@ -43,16 +58,26 @@ func (rq *receiveQueue) add(f *frame) {
 		// empty slot
 		rq.buf[idx] = *f
 		if idx == rq.rp {
-			// wake up one waiting reader, if any
+			log.Trace("wake up one waiting reader, if any")
 			rq.cond.Signal()
 		}
+		return true
 	} else if rq.buf[idx].fn == f.fn {
-		// retransmission, skip
+		// retransmission, ignore
 		pool.Put(f.bytes)
-	} else {
-		pool.Put(f.bytes)
-		panic("would override unconsumed frame!!!")
+		return true
 	}
+	return false
+}
+
+func (rq *receiveQueue) waitForSlot() bool {
+	rq.condAdd.L.Lock()
+	rq.condAdd.Wait()
+	rq.condAdd.L.Unlock()
+	if atomic.LoadUint32(&rq.closed) == 1 {
+		return false
+	}
+	return true
 }
 
 func (rq *receiveQueue) read(b []byte) (int, error) {
@@ -68,13 +93,15 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		if rq.dlExceeded() {
 			return 0, context.DeadlineExceeded
 		}
+		log.Trace("wait for something ready in the receive queue")
 		rq.cond.Wait()
-		log.Tracef("awoke with %v bytes", len(rq.buf[rq.rp].bytes))
+		log.Trace("awake")
 	}
 	totalN := 0
 	for {
 		if rq.buf[rq.rp].bytes == nil {
 			if totalN > 0 {
+				rq.condAdd.Signal()
 				return totalN, nil
 			}
 			panic("should not happen")
@@ -92,6 +119,7 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		}
 		totalN += n
 		if totalN == len(b) {
+			rq.condAdd.Signal()
 			return totalN, nil
 		}
 	}
@@ -118,4 +146,5 @@ func (rq *receiveQueue) dlExceeded() bool {
 func (rq *receiveQueue) close() {
 	atomic.StoreUint32(&rq.closed, 1)
 	rq.cond.Broadcast()
+	rq.condAdd.Broadcast()
 }

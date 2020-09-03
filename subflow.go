@@ -42,6 +42,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		emaRTT:      ema.NewDuration(longRTT, 0.1),
 		tracker:     tracker,
 	}
+	go sf.sendLoop()
 	if clientSide {
 		initialRTT := time.Since(probeStart)
 		tracker.updateRTT(initialRTT)
@@ -57,7 +58,6 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 			log.Debugf("read loop to %s ended: %v", sf.to, err)
 		}
 	}()
-	go sf.sendLoop()
 	return sf
 }
 
@@ -126,7 +126,13 @@ func (sf *subflow) sendLoop() {
 			n, err := sf.conn.Write(frame.buf)
 			if err != nil {
 				sf.close()
-				sf.mpc.retransmit(frame)
+				if frame.isDataFrame() {
+					sf.mpc.retransmit(frame)
+					continue
+				}
+			}
+			if !frame.isDataFrame() {
+				frame.release()
 				continue
 			}
 			if frame.retransmissions == 0 {
@@ -135,31 +141,24 @@ func (sf *subflow) sendLoop() {
 				sf.tracker.onRetransmit(frame.sz)
 			}
 			log.Tracef("Done writing %d bytes to wire", n)
-			if frame.isDataFrame() {
-				now := time.Now()
-				sf.muPendingAcks.Lock()
-				sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
-				sf.muPendingAcks.Unlock()
-				frameCopy := *frame // to avoid race
-				time.AfterFunc(sf.retransTimer(), func() {
-					if sf.isPendingAck(frameCopy.fn) {
-						sf.mpc.retransmit(&frameCopy)
-					} else {
-						frame.release()
-					}
-				})
-			}
+			now := time.Now()
+			sf.muPendingAcks.Lock()
+			sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
+			sf.muPendingAcks.Unlock()
+			frameCopy := *frame // to avoid race
+			time.AfterFunc(sf.retransTimer(), func() {
+				if sf.isPendingAck(frameCopy.fn) {
+					sf.mpc.retransmit(&frameCopy)
+				} else {
+					frame.release()
+				}
+			})
 		}
 	}
 }
 
 func (sf *subflow) ack(fn uint64) {
-	frame := composeFrame(fn, nil)
-	_, err := sf.conn.Write(frame.buf)
-	if err != nil {
-		sf.close()
-	}
-	frame.release()
+	sf.sendQueue <- composeFrame(fn, nil)
 }
 
 func (sf *subflow) gotACK(fn uint64) {

@@ -173,7 +173,7 @@ func (mpd *mpDialer) sorted() []*subflowDialer {
 
 func (mpd *mpDialer) FormatStats() (stats []string) {
 	for _, d := range mpd.sorted() {
-		stats = append(stats, fmt.Sprintf("%s  S: %4d(%3d)  F: %4d  RTT: %6.0fms  SENT: %6d/%6s  RECV: %6d/%6s  RT: %6d/%6s",
+		stats = append(stats, fmt.Sprintf("%s  S: %4d(%3d)  F: %4d  RTT: %6.0fms  SENT: %7d/%7s  RECV: %7d/%7s  RT: %7d/%7s",
 			d.label,
 			atomic.LoadUint64(&d.successes),
 			atomic.LoadUint64(&d.consecSuccesses),

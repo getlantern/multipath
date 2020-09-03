@@ -103,7 +103,7 @@ func (bc *mpConn) retransmit(frame *sendFrame) {
 			}
 		}
 	}
-	log.Debugf("frame #%d is being retransmitted on all subflows, give up", frame.fn)
+	log.Tracef("frame #%d is being retransmitted on all subflows, give up", frame.fn)
 	frame.release()
 	return
 }

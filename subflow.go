@@ -54,7 +54,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 	}
 	go func() {
 		if err := sf.readLoop(); err != nil {
-			log.Debugf("read loop to %v ended: %v", sf.to, err)
+			log.Debugf("read loop to %s ended: %v", sf.to, err)
 		}
 	}()
 	go sf.sendLoop()
@@ -81,7 +81,7 @@ func (sf *subflow) readLoop() (err error) {
 				sf.gotACK(fn)
 				continue
 			}
-			log.Tracef("got frame# %v from %v with %v bytes", fn, sf.to, sz)
+			log.Tracef("got frame# %d from %s with %d bytes", fn, sf.to, sz)
 			buf := pool.Get(int(sz))
 			_, err = io.ReadFull(r, buf)
 			if err != nil {
@@ -134,7 +134,7 @@ func (sf *subflow) sendLoop() {
 			} else {
 				sf.tracker.onRetransmit(frame.sz)
 			}
-			log.Tracef("Done writing %v bytes to wire", n)
+			log.Tracef("Done writing %d bytes to wire", n)
 			if frame.isDataFrame() {
 				now := time.Now()
 				sf.muPendingAcks.Lock()
@@ -164,7 +164,7 @@ func (sf *subflow) ack(fn uint64) {
 
 func (sf *subflow) gotACK(fn uint64) {
 	if fn == frameTypePing {
-		log.Tracef("pong to %v", sf.to)
+		log.Tracef("pong to %s", sf.to)
 		sf.ack(frameTypePong)
 		return
 	}
@@ -180,7 +180,7 @@ func (sf *subflow) gotACK(fn uint64) {
 			}
 		}
 	}
-	log.Tracef("Got ack for frame# %v", fn)
+	log.Tracef("Got ack for frame# %d", fn)
 	sf.muPendingAcks.Lock()
 	defer sf.muPendingAcks.Unlock()
 	pendingAck, found := sf.pendingAcks[fn]
@@ -203,7 +203,7 @@ func (sf *subflow) isPendingAck(fn uint64) bool {
 }
 
 func (sf *subflow) probe() {
-	log.Tracef("ping %v", sf.to)
+	log.Tracef("ping %s", sf.to)
 	sf.ack(frameTypePing)
 	sf.probeStart.Store(time.Now())
 }
@@ -218,7 +218,7 @@ func (sf *subflow) retransTimer() time.Duration {
 
 func (sf *subflow) close() {
 	sf.closeOnce.Do(func() {
-		log.Tracef("closing subflow to %v", sf.to)
+		log.Tracef("closing subflow to %s", sf.to)
 		sf.mpc.remove(sf)
 		sf.conn.Close()
 		close(sf.chClose)

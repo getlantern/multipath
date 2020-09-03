@@ -50,7 +50,7 @@ func (mpl *mpListener) start() {
 					case <-mpl.chClose:
 						return
 					default:
-						log.Debugf("failed to accept from %v: %v", l.Addr(), err)
+						log.Debugf("failed to accept from %s: %v", l.Addr(), err)
 					}
 				}
 			}
@@ -79,9 +79,9 @@ func (mpl *mpListener) acceptFrom(l net.Listener) error {
 		newConn = true
 		cid = atomic.AddUint64(&mpl.nextCID, 1)
 		binary.LittleEndian.PutUint64(leadBytes[1:], cid)
-		log.Tracef("New connection from %v, assigned CID %v", conn.RemoteAddr(), cid)
+		log.Tracef("New connection from %v, assigned CID %d", conn.RemoteAddr(), cid)
 	} else {
-		log.Tracef("New subflow of CID %v from %v", cid, conn.RemoteAddr())
+		log.Tracef("New subflow of CID %d from %v", cid, conn.RemoteAddr())
 	}
 	probeStart := time.Now()
 	// echo lead bytes back to the client

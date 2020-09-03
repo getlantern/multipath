@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/getlantern/ema"
 )
 
@@ -27,9 +28,9 @@ type Stats interface {
 type subflowDialer struct {
 	Dialer
 	label            string
-	dials            uint64
 	successes        uint64
 	consecSuccesses  uint64
+	failures         uint64
 	framesSent       uint64
 	framesRetransmit uint64
 	framesRecv       uint64
@@ -41,13 +42,13 @@ type subflowDialer struct {
 
 func (sfd *subflowDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	conn, err := sfd.Dialer.DialContext(ctx)
-	atomic.AddUint64(&sfd.dials, 1)
 	if err == nil {
 		atomic.AddUint64(&sfd.successes, 1)
 		atomic.AddUint64(&sfd.consecSuccesses, 1)
 	} else {
 		// reset RTT to deprioritize this dialer
 		sfd.emaRTT.SetDuration(longRTT)
+		atomic.AddUint64(&sfd.failures, 1)
 		atomic.StoreUint64(&sfd.consecSuccesses, 0)
 	}
 	return conn, err
@@ -90,13 +91,13 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	for i, d := range dialers {
 		conn, err := d.DialContext(ctx)
 		if err != nil {
-			log.Errorf("failed to dial %v: %v", d.Label(), err)
+			log.Errorf("failed to dial %s: %v", d.Label(), err)
 			continue
 		}
 		probeStart := time.Now()
 		cid, err := mpd.handshake(conn, 0)
 		if err != nil {
-			log.Errorf("failed to handshake %v, continuing: %v", d.Label(), err)
+			log.Errorf("failed to handshake %s, continuing: %v", d.Label(), err)
 			conn.Close()
 			continue
 		}
@@ -106,13 +107,13 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			go func(d *subflowDialer) {
 				conn, err := d.DialContext(ctx)
 				if err != nil {
-					log.Errorf("failed to dial %v: %v", d.Label(), err)
+					log.Errorf("failed to dial %s: %v", d.Label(), err)
 					return
 				}
 				probeStart := time.Now()
 				_, err = mpd.handshake(conn, cid)
 				if err != nil {
-					log.Errorf("failed to handshake %v, continuing: %v", d.Label(), err)
+					log.Errorf("failed to handshake %s, continuing: %v", d.Label(), err)
 					conn.Close()
 					return
 				}
@@ -172,16 +173,15 @@ func (mpd *mpDialer) sorted() []*subflowDialer {
 
 func (mpd *mpDialer) FormatStats() (stats []string) {
 	for _, d := range mpd.sorted() {
-		dials := atomic.LoadUint64(&d.dials)
-		successes := atomic.LoadUint64(&d.successes)
-		consecSuccesses := atomic.LoadUint64(&d.consecSuccesses)
-		stats = append(stats, fmt.Sprintf("%s  A: %4d  S: %4d(%3d)  F: %4d  RTT: %6.0fms  SENT: %5d/%5dkB  RECV: %5d/%5dkB  RT: %5d/%5dkB",
+		stats = append(stats, fmt.Sprintf("%s  S: %4d(%3d)  F: %4d  RTT: %6.0fms  SENT: %6d/%6s  RECV: %6d/%6s  RT: %6d/%6s",
 			d.label,
-			dials, successes, consecSuccesses, dials-successes,
+			atomic.LoadUint64(&d.successes),
+			atomic.LoadUint64(&d.consecSuccesses),
+			atomic.LoadUint64(&d.failures),
 			d.emaRTT.GetDuration().Seconds()*1000,
-			atomic.LoadUint64(&d.framesSent), atomic.LoadUint64(&d.bytesSent)/1000,
-			atomic.LoadUint64(&d.framesRecv), atomic.LoadUint64(&d.bytesRecv)/1000,
-			atomic.LoadUint64(&d.framesRetransmit), atomic.LoadUint64(&d.bytesRetransmit)/1000))
+			atomic.LoadUint64(&d.framesSent), humanize.Bytes(atomic.LoadUint64(&d.bytesSent)),
+			atomic.LoadUint64(&d.framesRecv), humanize.Bytes(atomic.LoadUint64(&d.bytesRecv)),
+			atomic.LoadUint64(&d.framesRetransmit), humanize.Bytes(atomic.LoadUint64(&d.bytesRetransmit))))
 	}
 	return
 }

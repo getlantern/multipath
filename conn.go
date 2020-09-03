@@ -1,14 +1,11 @@
 package multipath
 
 import (
-	"bytes"
 	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	pool "github.com/libp2p/go-buffer-pool"
 )
 
 type mpConn struct {
@@ -28,18 +25,6 @@ func newMPConn(cid uint64) *mpConn {
 }
 func (bc *mpConn) Read(b []byte) (n int, err error) {
 	return bc.recvQueue.read(b)
-}
-
-func composeFrame(fn uint64, b []byte) sendFrame {
-	sz := len(b)
-	buf := pool.Get(8 + 8 + sz)
-	wb := bytes.NewBuffer(buf[:0])
-	WriteVarInt(wb, uint64(sz))
-	WriteVarInt(wb, fn)
-	if sz > 0 {
-		wb.Write(b)
-	}
-	return sendFrame{fn: fn, sz: uint64(sz), buf: wb.Bytes()}
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
@@ -103,11 +88,12 @@ func (bc *mpConn) first() *subflow {
 	return bc.subflows[0]
 }
 
-func (bc *mpConn) retransmit(frame sendFrame) {
+func (bc *mpConn) retransmit(frame *sendFrame) {
 	subflows := bc.sortedSubflows()
 	frame.retransmissions++
 	if frame.retransmissions >= len(subflows)-1 {
 		log.Debugf("Give up retransmitting frame# %v", frame.fn)
+		frame.release()
 		return
 	}
 	for _, sf := range subflows {
@@ -123,6 +109,7 @@ func (bc *mpConn) retransmit(frame sendFrame) {
 		}
 	}
 	log.Debug("No eligible subflow for retransmitting, skipped")
+	frame.release()
 }
 
 func (bc *mpConn) sortedSubflows() []*subflow {

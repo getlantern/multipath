@@ -23,7 +23,7 @@ type subflow struct {
 
 	chClose       chan struct{}
 	closeOnce     sync.Once
-	sendQueue     chan sendFrame
+	sendQueue     chan *sendFrame
 	pendingAcks   map[uint64]pendingAck
 	muPendingAcks sync.Mutex
 	probeStart    atomic.Value // time.Time
@@ -37,7 +37,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		conn:        c,
 		mpc:         mpc,
 		chClose:     make(chan struct{}),
-		sendQueue:   make(chan sendFrame),
+		sendQueue:   make(chan *sendFrame),
 		pendingAcks: make(map[uint64]pendingAck),
 		emaRTT:      ema.NewDuration(longRTT, 0.1),
 		tracker:     tracker,
@@ -127,6 +127,7 @@ func (sf *subflow) sendLoop() {
 			if err != nil {
 				sf.close()
 				sf.mpc.retransmit(frame)
+				continue
 			}
 			if frame.retransmissions == 0 {
 				sf.tracker.onSent(frame.sz)
@@ -139,10 +140,12 @@ func (sf *subflow) sendLoop() {
 				sf.muPendingAcks.Lock()
 				sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
 				sf.muPendingAcks.Unlock()
-				frameCopy := frame // to avoid race
+				frameCopy := *frame // to avoid race
 				time.AfterFunc(sf.retransTimer(), func() {
 					if sf.isPendingAck(frameCopy.fn) {
-						sf.mpc.retransmit(frameCopy)
+						sf.mpc.retransmit(&frameCopy)
+					} else {
+						frame.release()
 					}
 				})
 			}
@@ -156,7 +159,7 @@ func (sf *subflow) ack(fn uint64) {
 	if err != nil {
 		sf.close()
 	}
-	pool.Put(frame.buf)
+	frame.release()
 }
 
 func (sf *subflow) gotACK(fn uint64) {

@@ -47,10 +47,13 @@
 package multipath
 
 import (
+	"bytes"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/golog"
+	pool "github.com/libp2p/go-buffer-pool"
 )
 
 const (
@@ -80,11 +83,33 @@ type sendFrame struct {
 	fn              uint64
 	sz              uint64
 	buf             []byte
+	released        *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
 	retransmissions int
+}
+
+func composeFrame(fn uint64, b []byte) *sendFrame {
+	sz := len(b)
+	buf := pool.Get(8 + 8 + sz)
+	wb := bytes.NewBuffer(buf[:0])
+	WriteVarInt(wb, uint64(sz))
+	WriteVarInt(wb, fn)
+	if sz > 0 {
+		wb.Write(b)
+	}
+	var released int32
+	return &sendFrame{fn: fn, sz: uint64(sz), buf: wb.Bytes(), released: &released}
 }
 
 func (f *sendFrame) isDataFrame() bool {
 	return f.sz > 0
+}
+
+func (f *sendFrame) release() {
+	if atomic.CompareAndSwapInt32(f.released, 0, 1) {
+		pool.Put(f.buf)
+	} else {
+		log.Error("Release already released buffer!")
+	}
 }
 
 type statsTracker interface {

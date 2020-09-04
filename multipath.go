@@ -118,10 +118,3 @@ type statsTracker interface {
 	onRetransmit(uint64)
 	updateRTT(time.Duration)
 }
-
-type nullStatsTracker struct{}
-
-func (t nullStatsTracker) onRecv(uint64)           {}
-func (t nullStatsTracker) onSent(uint64)           {}
-func (t nullStatsTracker) onRetransmit(uint64)     {}
-func (t nullStatsTracker) updateRTT(time.Duration) {}

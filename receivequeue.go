@@ -58,7 +58,6 @@ func (rq *receiveQueue) tryAdd(f *frame) bool {
 		// empty slot
 		rq.buf[idx] = *f
 		if idx == rq.rp {
-			log.Trace("wake up one waiting reader, if any")
 			rq.cond.Signal()
 		}
 		return true
@@ -93,9 +92,7 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		if rq.dlExceeded() {
 			return 0, context.DeadlineExceeded
 		}
-		log.Trace("wait for something ready in the receive queue")
 		rq.cond.Wait()
-		log.Trace("awake")
 	}
 	totalN := 0
 	for {

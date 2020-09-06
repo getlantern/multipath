@@ -3,20 +3,17 @@ package multipath
 import (
 	"bufio"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/dustin/go-humanize"
 )
 
 type mpListener struct {
 	nextCID        uint64
 	listeners      []net.Listener
-	listenerStats  []stats
+	listenerStats  []StatsTracker
 	mpConns        map[uint64]*mpConn
 	muMPConns      sync.Mutex
 	chNextAccepted chan net.Conn
@@ -25,30 +22,14 @@ type mpListener struct {
 	closeOnce      sync.Once
 }
 
-func MPListener(ls ...net.Listener) net.Listener {
-	mpl := &mpListener{listeners: ls,
-		listenerStats:  make([]stats, len(ls)),
+func MPListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
+	mpl := &mpListener{
+		listeners:      listeners,
+		listenerStats:  stats,
 		mpConns:        make(map[uint64]*mpConn),
 		chNextAccepted: make(chan net.Conn),
 		chClose:        make(chan struct{}),
 	}
-	for i, l := range ls {
-		mpl.listenerStats[i].label = fmt.Sprintf("%10s(%s)",
-			l.Addr().String(), l.Addr().Network())
-	}
-	tk := time.NewTicker(time.Minute)
-	go func() {
-		for {
-			select {
-			case <-mpl.chClose:
-				return
-			case <-tk.C:
-				for _, line := range mpl.FormatStats() {
-					log.Debug(line)
-				}
-			}
-		}
-	}()
 	return mpl
 }
 
@@ -70,7 +51,7 @@ func (mpl *mpListener) Addr() net.Addr {
 
 func (mpl *mpListener) start() {
 	for i, l := range mpl.listeners {
-		go func(l net.Listener, st statsTracker) {
+		go func(l net.Listener, st StatsTracker) {
 			for {
 				if err := mpl.acceptFrom(l, st); err != nil {
 					select {
@@ -81,11 +62,11 @@ func (mpl *mpListener) start() {
 					}
 				}
 			}
-		}(l, &mpl.listenerStats[i])
+		}(l, mpl.listenerStats[i])
 	}
 }
 
-func (mpl *mpListener) acceptFrom(l net.Listener, st statsTracker) error {
+func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	conn, err := l.Accept()
 	if err != nil {
 		return err
@@ -135,40 +116,4 @@ func (mpl *mpListener) remove(cid uint64) {
 	mpl.muMPConns.Lock()
 	delete(mpl.mpConns, cid)
 	mpl.muMPConns.Unlock()
-}
-
-func (mpd *mpListener) FormatStats() (stats []string) {
-	for _, st := range mpd.listenerStats {
-		stats = append(stats, fmt.Sprintf("%s  SENT: %7d/%7s  RECV: %7d/%7s  RT: %7d/%7s",
-			st.label,
-			atomic.LoadUint64(&st.framesSent), humanize.Bytes(atomic.LoadUint64(&st.bytesSent)),
-			atomic.LoadUint64(&st.framesRecv), humanize.Bytes(atomic.LoadUint64(&st.bytesRecv)),
-			atomic.LoadUint64(&st.framesRetransmit), humanize.Bytes(atomic.LoadUint64(&st.bytesRetransmit))))
-	}
-	return
-}
-
-type stats struct {
-	label            string
-	framesSent       uint64
-	framesRetransmit uint64
-	framesRecv       uint64
-	bytesSent        uint64
-	bytesRetransmit  uint64
-	bytesRecv        uint64
-}
-
-func (s *stats) onRecv(n uint64) {
-	atomic.AddUint64(&s.framesRecv, 1)
-	atomic.AddUint64(&s.bytesRecv, n)
-}
-func (s *stats) onSent(n uint64) {
-	atomic.AddUint64(&s.framesSent, 1)
-	atomic.AddUint64(&s.bytesSent, n)
-}
-func (s *stats) onRetransmit(n uint64) {
-	atomic.AddUint64(&s.framesRetransmit, 1)
-	atomic.AddUint64(&s.bytesRetransmit, n)
-}
-func (s *stats) updateRTT(time.Duration) {
 }

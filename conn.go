@@ -119,7 +119,7 @@ func (bc *mpConn) sortedSubflows() []*subflow {
 	return subflows
 }
 
-func (bc *mpConn) add(to string, c net.Conn, clientSide bool, probeStart time.Time, tracker statsTracker) {
+func (bc *mpConn) add(to string, c net.Conn, clientSide bool, probeStart time.Time, tracker StatsTracker) {
 	bc.muSubflows.Lock()
 	defer bc.muSubflows.Unlock()
 	bc.subflows = append(bc.subflows, startSubflow(to, c, bc, clientSide, probeStart, tracker))

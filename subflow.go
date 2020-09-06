@@ -28,10 +28,10 @@ type subflow struct {
 	muPendingAcks sync.Mutex
 	probeStart    atomic.Value // time.Time
 	emaRTT        *ema.EMA
-	tracker       statsTracker
+	tracker       StatsTracker
 }
 
-func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker statsTracker) *subflow {
+func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker StatsTracker) *subflow {
 	sf := &subflow{
 		to:          to,
 		conn:        c,
@@ -45,7 +45,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 	go sf.sendLoop()
 	if clientSide {
 		initialRTT := time.Since(probeStart)
-		tracker.updateRTT(initialRTT)
+		tracker.UpdateRTT(initialRTT)
 		sf.emaRTT.SetDuration(initialRTT)
 		// pong immediately so the server can calculate the RTT between when it
 		// sends the leading bytes and receives the pong frame.
@@ -91,7 +91,7 @@ func (sf *subflow) readLoop() (err error) {
 			}
 			sf.ack(fn)
 			ch <- &frame{fn: fn, bytes: buf}
-			sf.tracker.onRecv(sz)
+			sf.tracker.OnRecv(sz)
 			select {
 			case <-sf.chClose:
 				return
@@ -136,11 +136,11 @@ func (sf *subflow) sendLoop() {
 				continue
 			}
 			if frame.retransmissions == 0 {
-				sf.tracker.onSent(frame.sz)
+				sf.tracker.OnSent(frame.sz)
 			} else {
-				sf.tracker.onRetransmit(frame.sz)
+				sf.tracker.OnRetransmit(frame.sz)
 			}
-			log.Tracef("Done writing %d bytes to wire", n)
+			log.Tracef("done writing frame %d with %d bytes via %s", frame.fn, n, sf.to)
 			now := time.Now()
 			sf.muPendingAcks.Lock()
 			sf.pendingAcks[frame.fn] = pendingAck{len(frame.buf), now}
@@ -172,14 +172,14 @@ func (sf *subflow) gotACK(fn uint64) {
 			start := probeStart.(time.Time)
 			if !start.IsZero() {
 				rtt := time.Since(start)
-				sf.tracker.updateRTT(rtt)
+				sf.tracker.UpdateRTT(rtt)
 				sf.emaRTT.UpdateDuration(rtt)
 				sf.probeStart.Store(time.Time{})
 				return
 			}
 		}
 	}
-	log.Tracef("Got ack for frame# %d", fn)
+	log.Tracef("got ack for frame# %d", fn)
 	sf.muPendingAcks.Lock()
 	defer sf.muPendingAcks.Unlock()
 	pendingAck, found := sf.pendingAcks[fn]
@@ -188,7 +188,7 @@ func (sf *subflow) gotACK(fn uint64) {
 		// back through the same subflow, and a data frame is never sent over
 		// the same subflow more than once.
 		rtt := time.Since(pendingAck.sentAt)
-		sf.tracker.updateRTT(rtt)
+		sf.tracker.UpdateRTT(rtt)
 		sf.emaRTT.UpdateDuration(rtt)
 		delete(sf.pendingAcks, fn)
 	}

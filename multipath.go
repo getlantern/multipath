@@ -112,9 +112,18 @@ func (f *sendFrame) release() {
 	}
 }
 
-type statsTracker interface {
-	onRecv(uint64)
-	onSent(uint64)
-	onRetransmit(uint64)
-	updateRTT(time.Duration)
+// StatsTracker allows getting a sense of how the paths perform. Its methods
+// are called when each subflow sends or receives a frame.
+type StatsTracker interface {
+	OnRecv(uint64)
+	OnSent(uint64)
+	OnRetransmit(uint64)
+	UpdateRTT(time.Duration)
 }
+
+type nullTracker struct{}
+
+func (st nullTracker) OnRecv(uint64)           {}
+func (st nullTracker) OnSent(uint64)           {}
+func (st nullTracker) OnRetransmit(uint64)     {}
+func (st nullTracker) UpdateRTT(time.Duration) {}

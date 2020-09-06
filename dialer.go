@@ -54,19 +54,19 @@ func (sfd *subflowDialer) DialContext(ctx context.Context) (net.Conn, error) {
 	return conn, err
 }
 
-func (sfd *subflowDialer) onRecv(n uint64) {
+func (sfd *subflowDialer) OnRecv(n uint64) {
 	atomic.AddUint64(&sfd.framesRecv, 1)
 	atomic.AddUint64(&sfd.bytesRecv, n)
 }
-func (sfd *subflowDialer) onSent(n uint64) {
+func (sfd *subflowDialer) OnSent(n uint64) {
 	atomic.AddUint64(&sfd.framesSent, 1)
 	atomic.AddUint64(&sfd.bytesSent, n)
 }
-func (sfd *subflowDialer) onRetransmit(n uint64) {
+func (sfd *subflowDialer) OnRetransmit(n uint64) {
 	atomic.AddUint64(&sfd.framesRetransmit, 1)
 	atomic.AddUint64(&sfd.bytesRetransmit, n)
 }
-func (sfd *subflowDialer) updateRTT(rtt time.Duration) {
+func (sfd *subflowDialer) UpdateRTT(rtt time.Duration) {
 	sfd.emaRTT.UpdateDuration(rtt)
 }
 
@@ -75,7 +75,7 @@ type mpDialer struct {
 	dialers []*subflowDialer
 }
 
-func MPDialer(name string, dialers ...Dialer) Dialer {
+func MPDialer(name string, dialers []Dialer) Dialer {
 	var subflowDialers []*subflowDialer
 	for _, d := range dialers {
 		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(longRTT, 0.1)})

@@ -16,16 +16,18 @@ import (
 
 func TestE2E(t *testing.T) {
 	listeners := []net.Listener{}
+	trackers := []StatsTracker{}
 	dialers := []Dialer{}
 	for i := 0; i < 3; i++ {
 		l, _ := net.Listen("tcp", ":")
 		listeners = append(listeners, &testListener{l, l, 0})
+		trackers = append(trackers, nullTracker{})
 		for j := 0; j < rand.Intn(5); j++ {
 			dialers = append(dialers, &testDialer{0, "tcp", l.Addr().String()})
 		}
 	}
-	bl := MPListener(listeners...)
-	bd := MPDialer("endpoint", dialers...)
+	bl := MPListener(listeners, trackers)
+	bd := MPDialer("endpoint", dialers)
 
 	go func() {
 		for {

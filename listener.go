@@ -2,19 +2,18 @@ package multipath
 
 import (
 	"bufio"
-	"encoding/binary"
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type mpListener struct {
-	nextCID        uint64
 	listeners      []net.Listener
 	listenerStats  []StatsTracker
-	mpConns        map[uint64]*mpConn
+	mpConns        map[connectionID]*mpConn
 	muMPConns      sync.Mutex
 	chNextAccepted chan net.Conn
 	startOnce      sync.Once
@@ -26,7 +25,7 @@ func MPListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
 	mpl := &mpListener{
 		listeners:      listeners,
 		listenerStats:  stats,
-		mpConns:        make(map[uint64]*mpConn),
+		mpConns:        make(map[connectionID]*mpConn),
 		chNextAccepted: make(chan net.Conn),
 		chClose:        make(chan struct{}),
 	}
@@ -72,7 +71,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 		return err
 	}
 	r := bufio.NewReader(conn)
-	var leadBytes [1 + 8]byte
+	var leadBytes [leadBytesLength]byte
 	_, err = io.ReadFull(r, leadBytes[:])
 	if err != nil {
 		return err
@@ -81,15 +80,16 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	if uint8(version) != 0 {
 		return ErrUnexpectedVersion
 	}
-	cid := binary.LittleEndian.Uint64(leadBytes[1:])
+	var cid connectionID
+	copy(cid[:], leadBytes[1:])
 	var newConn bool
-	if cid == 0 {
+	if cid == zeroCID {
 		newConn = true
-		cid = atomic.AddUint64(&mpl.nextCID, 1)
-		binary.LittleEndian.PutUint64(leadBytes[1:], cid)
-		log.Tracef("New connection from %v, assigned CID %d", conn.RemoteAddr(), cid)
+		cid = connectionID(uuid.New())
+		copy(leadBytes[1:], cid[:])
+		log.Tracef("New connection from %v, assigned CID %v", conn.RemoteAddr(), cid)
 	} else {
-		log.Tracef("New subflow of CID %d from %v", cid, conn.RemoteAddr())
+		log.Tracef("New subflow of CID %v from %v", cid, conn.RemoteAddr())
 	}
 	probeStart := time.Now()
 	// echo lead bytes back to the client
@@ -112,7 +112,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	return nil
 }
 
-func (mpl *mpListener) remove(cid uint64) {
+func (mpl *mpListener) remove(cid connectionID) {
 	mpl.muMPConns.Lock()
 	delete(mpl.mpConns, cid)
 	mpl.muMPConns.Unlock()

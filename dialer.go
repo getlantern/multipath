@@ -2,7 +2,6 @@ package multipath
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -95,7 +94,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			continue
 		}
 		probeStart := time.Now()
-		cid, err := mpd.handshake(conn, 0)
+		cid, err := mpd.handshake(conn, zeroCID)
 		if err != nil {
 			log.Errorf("failed to handshake %s, continuing: %v", d.Label(), err)
 			conn.Close()
@@ -127,27 +126,26 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 
 // handshake exchanges version and cid with the peer and returns the connnection ID
 // both end agrees if no error happens.
-func (mpd *mpDialer) handshake(conn net.Conn, cid uint64) (uint64, error) {
-	var leadBytes [1 + 8]byte
+func (mpd *mpDialer) handshake(conn net.Conn, cid connectionID) (connectionID, error) {
+	var leadBytes [leadBytesLength]byte
 	// the first byte, version, is implicitly set to 0
-	if cid != 0 {
-		binary.LittleEndian.PutUint64(leadBytes[1:], cid)
-	}
+	copy(leadBytes[1:], cid[:])
 	_, err := conn.Write(leadBytes[:])
 	if err != nil {
-		return 0, err
+		return zeroCID, err
 	}
 	_, err = io.ReadFull(conn, leadBytes[:])
 	if err != nil {
-		return 0, err
+		return zeroCID, err
 	}
 	version := uint8(leadBytes[0])
 	if uint8(version) != 0 {
-		return 0, ErrUnexpectedVersion
+		return zeroCID, ErrUnexpectedVersion
 	}
-	newCID := binary.LittleEndian.Uint64(leadBytes[1:])
-	if cid != 0 && cid != newCID {
-		return 0, ErrUnexpectedCID
+	var newCID connectionID
+	copy(newCID[:], leadBytes[1:])
+	if cid != zeroCID && cid != newCID {
+		return zeroCID, ErrUnexpectedCID
 	}
 	return newCID, nil
 }

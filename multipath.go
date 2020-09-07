@@ -1,8 +1,8 @@
-// Package multipath provides a simple way to bond multiple network paths
+// Package multipath provides a simple way to aggregate multiple network paths
 // between a pair of hosts to form a single connection from the upper layer
 // perspective, for throughput and resilience.
 //
-// The term connection, path and subflow used here is the same as mentioned in
+// The term connection, path and subflow used here are the same as mentioned in
 // MP-TCP https://www.rfc-editor.org/rfc/rfc8684.html#name-terminology
 //
 // Each subflow is a bidirectional byte stream each side in the following form
@@ -11,7 +11,7 @@
 // server sends the assigned CID back. Subsequent subflows use the same CID.
 //
 //       ----------------------------------------------------
-//      |  version(1)  |  cid(8)  |  frames (...)  |
+//      |  version(1)  |  cid(16)  |  frames (...)  |
 //       ----------------------------------------------------
 //
 // There are two types of frames. Data frame carries application data while ack
@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/getlantern/golog"
+	"github.com/google/uuid"
 	pool "github.com/libp2p/go-buffer-pool"
 )
 
@@ -62,6 +63,7 @@ const (
 	frameTypePong  uint64 = 1
 
 	maxFrameSizeToCalculateRTT int = 1500
+	leadBytesLength                = 1 + 16 // 1 byte version + 16 bytes CID
 	recieveQueueLength             = 4096
 	probeInterval                  = time.Minute
 	longRTT                        = time.Minute
@@ -72,8 +74,10 @@ var (
 	ErrUnexpectedCID     = errors.New("unexpected connnection ID")
 	ErrClosed            = errors.New("closed connection")
 	log                  = golog.LoggerFor("multipath")
+	zeroCID              connectionID
 )
 
+type connectionID uuid.UUID
 type frame struct {
 	fn    uint64
 	bytes []byte

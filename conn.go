@@ -9,7 +9,7 @@ import (
 )
 
 type mpConn struct {
-	cid        uint64
+	cid        connectionID
 	nextFN     uint64
 	subflows   []*subflow
 	muSubflows sync.RWMutex
@@ -17,7 +17,7 @@ type mpConn struct {
 	closed     uint32 // 1 == true, 0 == false
 }
 
-func newMPConn(cid uint64) *mpConn {
+func newMPConn(cid connectionID) *mpConn {
 	return &mpConn{cid: cid,
 		nextFN:    minFrameNumber - 1,
 		recvQueue: newReceiveQueue(recieveQueueLength),

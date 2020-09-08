@@ -65,14 +65,17 @@ const (
 	maxFrameSizeToCalculateRTT int = 1500
 	leadBytesLength                = 1 + 16 // 1 byte version + 16 bytes CID
 	recieveQueueLength             = 4096
+	maxVarIntLength                = 8
 	probeInterval                  = time.Minute
 	longRTT                        = time.Minute
+	rttAlpha                       = 0.5 // this causes EMA to reflect changes more rapidly
 )
 
 var (
 	ErrUnexpectedVersion = errors.New("unexpected version")
 	ErrUnexpectedCID     = errors.New("unexpected connnection ID")
 	ErrClosed            = errors.New("closed connection")
+	ErrFailOnAllDialers  = errors.New("fail on all dialers")
 	log                  = golog.LoggerFor("multipath")
 	zeroCID              connectionID
 )
@@ -93,7 +96,7 @@ type sendFrame struct {
 
 func composeFrame(fn uint64, b []byte) *sendFrame {
 	sz := len(b)
-	buf := pool.Get(8 + 8 + sz)
+	buf := pool.Get(maxVarIntLength + maxVarIntLength + sz)
 	wb := bytes.NewBuffer(buf[:0])
 	WriteVarInt(wb, uint64(sz))
 	WriteVarInt(wb, fn)

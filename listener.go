@@ -1,7 +1,7 @@
 package multipath
 
 import (
-	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -22,6 +22,9 @@ type mpListener struct {
 }
 
 func MPListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
+	if len(listeners) != len(stats) {
+		panic("the number of stats trackers should match listeners")
+	}
 	mpl := &mpListener{
 		listeners:      listeners,
 		listenerStats:  stats,
@@ -34,7 +37,12 @@ func MPListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
 
 func (mpl *mpListener) Accept() (net.Conn, error) {
 	mpl.startOnce.Do(mpl.start)
-	return <-mpl.chNextAccepted, nil
+	select {
+	case <-mpl.chClose:
+		return nil, ErrClosed
+	case conn := <-mpl.chNextAccepted:
+		return conn, nil
+	}
 }
 
 func (mpl *mpListener) Close() error {
@@ -42,10 +50,9 @@ func (mpl *mpListener) Close() error {
 	return nil
 }
 
-// Addr satisfies the net.Listener interface. It returns the zero value of
-// net.IPAddr.
+// Addr satisfies the net.Listener interface. It returns a fake addr.
 func (mpl *mpListener) Addr() net.Addr {
-	return &net.IPAddr{}
+	return fakeAddr{}
 }
 
 func (mpl *mpListener) start() {
@@ -57,7 +64,7 @@ func (mpl *mpListener) start() {
 					case <-mpl.chClose:
 						return
 					default:
-						log.Debugf("failed to accept from %s: %v", l.Addr(), err)
+						log.Debugf("failed to accept on %s: %v", l.Addr(), err)
 					}
 				}
 			}
@@ -70,19 +77,17 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	if err != nil {
 		return err
 	}
-	r := bufio.NewReader(conn)
 	var leadBytes [leadBytesLength]byte
-	_, err = io.ReadFull(r, leadBytes[:])
+	_, err = io.ReadFull(conn, leadBytes[:])
 	if err != nil {
 		return err
 	}
-	version := uint8(leadBytes[0])
-	if uint8(version) != 0 {
+	if uint8(leadBytes[0]) != 0 {
 		return ErrUnexpectedVersion
 	}
 	var cid connectionID
 	copy(cid[:], leadBytes[1:])
-	var newConn bool
+	newConn := false
 	if cid == zeroCID {
 		newConn = true
 		cid = connectionID(uuid.New())
@@ -96,13 +101,16 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	if _, err := conn.Write(leadBytes[:]); err != nil {
 		return err
 	}
-	var bc *mpConn
 	mpl.muMPConns.Lock()
-	if newConn {
-		bc = newMPConn(cid)
-		mpl.mpConns[cid] = bc
-	} else {
-		bc = mpl.mpConns[cid]
+	bc, exists := mpl.mpConns[cid]
+	if !exists {
+		if newConn {
+			bc = newMPConn(cid)
+			mpl.mpConns[cid] = bc
+		} else {
+			mpl.muMPConns.Unlock()
+			return fmt.Errorf("unexpected subflow of CID %v from %v", cid, conn.RemoteAddr())
+		}
 	}
 	mpl.muMPConns.Unlock()
 	bc.add(conn.RemoteAddr().String(), conn, false, probeStart, st)

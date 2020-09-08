@@ -28,10 +28,11 @@ func (bc *mpConn) Read(b []byte) (n int, err error) {
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
-	if atomic.LoadUint32(&bc.closed) == 1 {
+	sorted := bc.sortedSubflows()
+	if len(sorted) == 0 {
 		return 0, ErrClosed
 	}
-	bc.first().sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
+	sorted[0].sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
 	return len(b), nil
 }
 
@@ -82,15 +83,9 @@ func (bc *mpConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func (bc *mpConn) first() *subflow {
-	bc.muSubflows.RLock()
-	defer bc.muSubflows.RUnlock()
-	return bc.subflows[0]
-}
-
 func (bc *mpConn) retransmit(frame *sendFrame) {
-	subflows := bc.sortedSubflows()
 	frame.retransmissions++
+	subflows := bc.sortedSubflows()
 	for _, sf := range subflows {
 		// choose the first subflow not waiting ack for this frame
 		if !sf.isPendingAck(frame.fn) {
@@ -98,7 +93,7 @@ func (bc *mpConn) retransmit(frame *sendFrame) {
 			case <-sf.chClose:
 				// continue
 			case sf.sendQueue <- frame:
-				log.Tracef("Retransmitted frame# %d via %s", frame.fn, sf.to)
+				log.Tracef("retransmitted frame# %d via %s", frame.fn, sf.to)
 				return
 			}
 		}

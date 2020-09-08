@@ -2,7 +2,6 @@ package multipath
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -15,11 +14,15 @@ import (
 	"github.com/getlantern/ema"
 )
 
+// Dialer is the interface each subflow dialer needs to satisify. It is also
+// the type of the multipath dialer.
 type Dialer interface {
 	DialContext(ctx context.Context) (net.Conn, error)
 	Label() string
 }
 
+// Stats is also provided by the multipath dialer so the caller can get and
+// print the status of each path.
 type Stats interface {
 	FormatStats() (stats []string)
 }
@@ -77,7 +80,7 @@ type mpDialer struct {
 func MPDialer(name string, dialers []Dialer) Dialer {
 	var subflowDialers []*subflowDialer
 	for _, d := range dialers {
-		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(longRTT, 0.1)})
+		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(longRTT, rttAlpha)})
 	}
 	d := &mpDialer{name, subflowDialers}
 	return d
@@ -86,42 +89,42 @@ func MPDialer(name string, dialers []Dialer) Dialer {
 // DialContext dials the addr using all dialers and returns a connection
 // contains subflows from whatever dialers available.
 func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
-	dialers := mpd.sorted()
-	for i, d := range dialers {
+	var bc *mpConn
+	dialOne := func(d *subflowDialer, cid connectionID) (connectionID, bool) {
 		conn, err := d.DialContext(ctx)
 		if err != nil {
 			log.Errorf("failed to dial %s: %v", d.Label(), err)
-			continue
+			return zeroCID, false
 		}
 		probeStart := time.Now()
-		cid, err := mpd.handshake(conn, zeroCID)
+		newCID, err := mpd.handshake(conn, cid)
 		if err != nil {
 			log.Errorf("failed to handshake %s, continuing: %v", d.Label(), err)
 			conn.Close()
+			return zeroCID, false
+		}
+		if cid == zeroCID {
+			bc = newMPConn(newCID)
+		}
+		bc.add(d.label, conn, true, probeStart, d)
+		return newCID, true
+	}
+	dialers := mpd.sorted()
+	for i, d := range dialers {
+		// dial the first connection with zero connection ID
+		cid, ok := dialOne(d, zeroCID)
+		if !ok {
 			continue
 		}
-		bc := newMPConn(cid)
-		bc.add(d.label, conn, true, probeStart, d)
-		for _, d := range dialers[i:] {
-			go func(d *subflowDialer) {
-				conn, err := d.DialContext(ctx)
-				if err != nil {
-					log.Errorf("failed to dial %s: %v", d.Label(), err)
-					return
-				}
-				probeStart := time.Now()
-				_, err = mpd.handshake(conn, cid)
-				if err != nil {
-					log.Errorf("failed to handshake %s, continuing: %v", d.Label(), err)
-					conn.Close()
-					return
-				}
-				bc.add(d.label, conn, true, probeStart, d)
-			}(d)
+		if i < len(dialers)-1 {
+			// dial the rest in parallel with server assigned connection ID
+			for _, d := range dialers[i+1:] {
+				go dialOne(d, cid)
+			}
 		}
 		return bc, nil
 	}
-	return nil, errors.New("no dailer left")
+	return nil, ErrFailOnAllDialers
 }
 
 // handshake exchanges version and cid with the peer and returns the connnection ID
@@ -138,8 +141,7 @@ func (mpd *mpDialer) handshake(conn net.Conn, cid connectionID) (connectionID, e
 	if err != nil {
 		return zeroCID, err
 	}
-	version := uint8(leadBytes[0])
-	if uint8(version) != 0 {
+	if uint8(leadBytes[0]) != 0 {
 		return zeroCID, ErrUnexpectedVersion
 	}
 	var newCID connectionID
@@ -160,7 +162,7 @@ func (mpd *mpDialer) sorted() []*subflowDialer {
 	sort.Slice(dialersCopy, func(i, j int) bool {
 		it := dialersCopy[i].emaRTT.GetDuration()
 		jt := dialersCopy[j].emaRTT.GetDuration()
-		// basically means both have unknown RTT or fail to dial
+		// both have unknown RTT or fail to dial, give each a chance
 		if it == jt {
 			return rand.Intn(2) > 0
 		}

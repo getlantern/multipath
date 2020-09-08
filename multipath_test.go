@@ -23,7 +23,7 @@ func TestE2E(t *testing.T) {
 		l, _ := net.Listen("tcp", ":")
 		var lock sync.Mutex
 		listeners = append(listeners, &testListener{l, delayEnforcer{cond: sync.NewCond(&lock)}, l})
-		trackers = append(trackers, nullTracker{})
+		trackers = append(trackers, NullTracker{})
 		// simulate one or more dialers to each listener
 		for j := 0; j <= rand.Intn(5); j++ {
 			var lock sync.Mutex

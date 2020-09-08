@@ -128,9 +128,9 @@ type StatsTracker interface {
 	UpdateRTT(time.Duration)
 }
 
-type nullTracker struct{}
+type NullTracker struct{}
 
-func (st nullTracker) OnRecv(uint64)           {}
-func (st nullTracker) OnSent(uint64)           {}
-func (st nullTracker) OnRetransmit(uint64)     {}
-func (st nullTracker) UpdateRTT(time.Duration) {}
+func (st NullTracker) OnRecv(uint64)           {}
+func (st NullTracker) OnSent(uint64)           {}
+func (st NullTracker) OnRetransmit(uint64)     {}
+func (st NullTracker) UpdateRTT(time.Duration) {}

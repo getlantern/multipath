@@ -1,7 +1,7 @@
 package multipath
 
 import (
-	"bufio"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
@@ -64,7 +64,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 
 func (sf *subflow) readLoop() (err error) {
 	ch := make(chan *frame)
-	r := bufio.NewReader(sf.conn)
+	r := byteReader{Reader: sf.conn}
 	go func() {
 		defer close(ch)
 		for {
@@ -125,13 +125,16 @@ func (sf *subflow) sendLoop() {
 		case <-sf.chClose:
 			return
 		case frame := <-sf.sendQueue:
-			_, err := sf.conn.Write(frame.buf)
+			n, err := sf.conn.Write(frame.buf)
 			if err != nil {
 				sf.close()
 				if frame.isDataFrame() {
 					sf.mpc.retransmit(frame)
-					continue
 				}
+				continue
+			}
+			if n != len(frame.buf) {
+				panic(fmt.Sprintf("expect to write %d bytes on %s, written %d", len(frame.buf), sf.to, n))
 			}
 			if !frame.isDataFrame() {
 				frame.release()

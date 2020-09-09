@@ -104,3 +104,16 @@ func VarIntLen(i uint64) int {
 		num     uint64
 	}{"value doesn't fit into 62 bits: ", i})
 }
+
+type byteReader struct {
+	io.Reader
+	b [1]byte
+}
+
+func (r byteReader) ReadByte() (byte, error) {
+	_, err := r.Reader.Read(r.b[:])
+	if err != nil {
+		return 0, err
+	}
+	return r.b[0], nil
+}

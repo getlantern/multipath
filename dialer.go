@@ -106,7 +106,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 		if cid == zeroCID {
 			bc = newMPConn(newCID)
 		}
-		bc.add(d.label, conn, true, probeStart, d)
+		bc.add(fmt.Sprintf("%x(%s)", newCID, d.label), conn, true, probeStart, d)
 		return newCID, true
 	}
 	dialers := mpd.sorted()

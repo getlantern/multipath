@@ -93,12 +93,12 @@ func (bc *mpConn) retransmit(frame *sendFrame) {
 			case <-sf.chClose:
 				// continue
 			case sf.sendQueue <- frame:
-				log.Tracef("retransmitted frame# %d via %s", frame.fn, sf.to)
+				log.Tracef("retransmitted frame %d via %s", frame.fn, sf.to)
 				return
 			}
 		}
 	}
-	log.Tracef("frame #%d is being retransmitted on all subflows, give up", frame.fn)
+	log.Tracef("frame %d is being retransmitted on all subflows of %x, give up", frame.fn, bc.cid)
 	frame.release()
 	return
 }

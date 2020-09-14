@@ -92,9 +92,9 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 		newConn = true
 		cid = connectionID(uuid.New())
 		copy(leadBytes[1:], cid[:])
-		log.Tracef("New connection from %v, assigned CID %v", conn.RemoteAddr(), cid)
+		log.Tracef("New connection from %v, assigned CID %x", conn.RemoteAddr(), cid)
 	} else {
-		log.Tracef("New subflow of CID %v from %v", cid, conn.RemoteAddr())
+		log.Tracef("New subflow of CID %x from %v", cid, conn.RemoteAddr())
 	}
 	probeStart := time.Now()
 	// echo lead bytes back to the client
@@ -113,7 +113,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 		}
 	}
 	mpl.muMPConns.Unlock()
-	bc.add(conn.RemoteAddr().String(), conn, false, probeStart, st)
+	bc.add(fmt.Sprintf("%x(%s)", cid, conn.RemoteAddr().String()), conn, false, probeStart, st)
 	if newConn {
 		mpl.chNextAccepted <- bc
 	}

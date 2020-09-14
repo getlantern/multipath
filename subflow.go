@@ -82,7 +82,7 @@ func (sf *subflow) readLoop() (err error) {
 				sf.gotACK(fn)
 				continue
 			}
-			log.Tracef("got frame# %d from %s with %d bytes", fn, sf.to, sz)
+			log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
 			buf := pool.Get(int(sz))
 			_, err = io.ReadFull(r, buf)
 			if err != nil {
@@ -182,11 +182,11 @@ func (sf *subflow) gotACK(fn uint64) {
 			if !start.IsZero() {
 				sf.updateRTT(time.Since(start))
 				sf.probeStart.Store(time.Time{})
-				return
 			}
 		}
+		return
 	}
-	log.Tracef("got ack for frame# %d from %s", fn, sf.to)
+	log.Tracef("got ack for frame %d from %s", fn, sf.to)
 	sf.muPendingAcks.Lock()
 	defer sf.muPendingAcks.Unlock()
 	pendingAck, found := sf.pendingAcks[fn]

@@ -118,6 +118,7 @@ func (sf *subflow) readLoop() (err error) {
 			probeTimer.Reset(randomize(probeInterval))
 		case <-probeTimer.C:
 			sf.probe()
+			probeTimer.Reset(randomize(probeInterval))
 		}
 	}
 }

@@ -84,11 +84,14 @@ func (sf *subflow) readLoop() (err error) {
 			}
 			log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
 			buf := pool.Get(int(sz))
-			_, err = io.ReadFull(r, buf)
+			n, err := io.ReadFull(r, buf)
 			if err != nil {
 				pool.Put(buf)
 				sf.close()
 				return
+			}
+			if n != int(sz) {
+				panic(fmt.Sprintf("expect to read %d bytes, read %d", sz, n))
 			}
 			sf.ack(fn)
 			ch <- &frame{fn: fn, bytes: buf}
@@ -167,7 +170,11 @@ func (sf *subflow) sendLoop() {
 }
 
 func (sf *subflow) ack(fn uint64) {
-	sf.sendQueue <- composeFrame(fn, nil)
+	select {
+	case <-sf.chClose:
+		return
+	case sf.sendQueue <- composeFrame(fn, nil):
+	}
 }
 
 func (sf *subflow) gotACK(fn uint64) {

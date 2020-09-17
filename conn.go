@@ -10,7 +10,7 @@ import (
 
 type mpConn struct {
 	cid        connectionID
-	nextFN     uint64
+	lastFN     uint64
 	subflows   []*subflow
 	muSubflows sync.RWMutex
 	recvQueue  *receiveQueue
@@ -19,7 +19,7 @@ type mpConn struct {
 
 func newMPConn(cid connectionID) *mpConn {
 	return &mpConn{cid: cid,
-		nextFN:    minFrameNumber - 1,
+		lastFN:    minFrameNumber - 1,
 		recvQueue: newReceiveQueue(recieveQueueLength),
 	}
 }
@@ -32,7 +32,7 @@ func (bc *mpConn) Write(b []byte) (n int, err error) {
 	if len(sorted) == 0 {
 		return 0, ErrClosed
 	}
-	sorted[0].sendQueue <- composeFrame(atomic.AddUint64(&bc.nextFN, 1), b)
+	sorted[0].sendQueue <- composeFrame(atomic.AddUint64(&bc.lastFN, 1), b)
 	return len(b), nil
 }
 

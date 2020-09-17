@@ -73,16 +73,16 @@ func (sfd *subflowDialer) UpdateRTT(rtt time.Duration) {
 }
 
 type mpDialer struct {
-	name    string
+	dest    string
 	dialers []*subflowDialer
 }
 
-func MPDialer(name string, dialers []Dialer) Dialer {
+func NewDialer(dest string, dialers []Dialer) Dialer {
 	var subflowDialers []*subflowDialer
 	for _, d := range dialers {
 		subflowDialers = append(subflowDialers, &subflowDialer{Dialer: d, label: d.Label(), emaRTT: ema.NewDuration(longRTT, rttAlpha)})
 	}
-	d := &mpDialer{name, subflowDialers}
+	d := &mpDialer{dest, subflowDialers}
 	return d
 }
 
@@ -153,7 +153,7 @@ func (mpd *mpDialer) handshake(conn net.Conn, cid connectionID) (connectionID, e
 }
 
 func (mpd *mpDialer) Label() string {
-	return fmt.Sprintf("multipath dialer to %s with %d paths", mpd.name, len(mpd.dialers))
+	return fmt.Sprintf("multipath dialer to %s with %d paths", mpd.dest, len(mpd.dialers))
 }
 
 func (mpd *mpDialer) sorted() []*subflowDialer {

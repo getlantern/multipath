@@ -21,7 +21,7 @@ type mpListener struct {
 	closeOnce      sync.Once
 }
 
-func MPListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
+func NewListener(listeners []net.Listener, stats []StatsTracker) net.Listener {
 	if len(listeners) != len(stats) {
 		panic("the number of stats trackers should match listeners")
 	}

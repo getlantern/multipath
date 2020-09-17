@@ -6,6 +6,8 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,11 +18,17 @@ import (
 )
 
 func TestE2E(t *testing.T) {
+	go func() {
+		http.ListenAndServe("localhost:6060", nil)
+	}()
 	listeners := []net.Listener{}
 	trackers := []StatsTracker{}
 	dialers := []Dialer{}
 	for i := 0; i < 3; i++ {
-		l, _ := net.Listen("tcp", ":")
+		l, err := net.Listen("tcp", ":")
+		if !assert.NoError(t, err) {
+			continue
+		}
 		var lock sync.Mutex
 		listeners = append(listeners, &testListener{l, delayEnforcer{cond: sync.NewCond(&lock)}, l})
 		trackers = append(trackers, NullTracker{})
@@ -32,8 +40,8 @@ func TestE2E(t *testing.T) {
 		}
 	}
 	log.Debugf("Testing with %d listeners and %d dialers", len(listeners), len(dialers))
-	bl := MPListener(listeners, trackers)
-	bd := MPDialer("endpoint", dialers)
+	bl := NewListener(listeners, trackers)
+	bd := NewDialer("endpoint", dialers)
 
 	go func() {
 		for {
@@ -54,7 +62,9 @@ func TestE2E(t *testing.T) {
 		}
 	}()
 	conn, err := bd.DialContext(context.Background())
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		return
+	}
 	b := make([]byte, 4)
 	roundtrip := func() {
 		for i := 0; i < 10; i++ {

@@ -14,7 +14,7 @@ import (
 )
 
 type pendingAck struct {
-	sz     int
+	sz     uint64
 	sentAt time.Time
 }
 type subflow struct {
@@ -56,7 +56,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 	}
 	go func() {
 		if err := sf.readLoop(); err != nil {
-			log.Debugf("read loop to %s ended: %v", sf.to, err)
+			log.Errorf("read loop to %s ended: %v", sf.to, err)
 		}
 	}()
 	return sf
@@ -68,12 +68,14 @@ func (sf *subflow) readLoop() (err error) {
 	go func() {
 		defer close(ch)
 		for {
-			sz, err := ReadVarInt(r)
+			var sz, fn uint64
+			var n int
+			sz, err = ReadVarInt(r)
 			if err != nil {
 				sf.close()
 				return
 			}
-			fn, err := ReadVarInt(r)
+			fn, err = ReadVarInt(r)
 			if err != nil {
 				sf.close()
 				return
@@ -84,7 +86,7 @@ func (sf *subflow) readLoop() (err error) {
 			}
 			log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
 			buf := pool.Get(int(sz))
-			n, err := io.ReadFull(r, buf)
+			n, err = io.ReadFull(r, buf)
 			if err != nil {
 				pool.Put(buf)
 				sf.close()
@@ -131,6 +133,9 @@ func (sf *subflow) sendLoop() {
 		case frame := <-sf.sendQueue:
 			n, err := sf.conn.Write(frame.buf)
 			if err != nil {
+				log.Errorf("failed to write frame to %s: %v", sf.to, err)
+				// TODO: For temporary errors, maybe send the subflow to the
+				// back of the line instead of closing it.
 				sf.close()
 				if frame.isDataFrame() {
 					sf.mpc.retransmit(frame)
@@ -151,15 +156,15 @@ func (sf *subflow) sendLoop() {
 			}
 			log.Tracef("done writing frame %d with %d bytes via %s", frame.fn, frame.sz, sf.to)
 			sf.muPendingAcks.Lock()
-			sf.pendingAcks[frame.fn] = pendingAck{int(frame.sz), time.Now()}
+			sf.pendingAcks[frame.fn] = pendingAck{frame.sz, time.Now()}
 			sf.muPendingAcks.Unlock()
-			frameCopy := *frame // to avoid race
+			// frameCopy := *frame // to avoid race
 			d := sf.retransTimer()
 			time.AfterFunc(d, func() {
-				if sf.isPendingAck(frameCopy.fn) {
+				if sf.isPendingAck(frame.fn) {
 					// No ack means the subflow fails or has a longer RTT
 					sf.updateRTT(d)
-					sf.mpc.retransmit(&frameCopy)
+					sf.mpc.retransmit(frame)
 				} else {
 					// It is ok to release buffer here as the frame will never
 					// be retransmitted again.
@@ -198,11 +203,13 @@ func (sf *subflow) gotACK(fn uint64) {
 	sf.muPendingAcks.Lock()
 	defer sf.muPendingAcks.Unlock()
 	pendingAck, found := sf.pendingAcks[fn]
-	if found && pendingAck.sz < maxFrameSizeToCalculateRTT {
-		// it's okay to calculate RTT this way because ack frame is always sent
-		// back through the same subflow, and a data frame is never sent over
-		// the same subflow more than once.
-		sf.updateRTT(time.Since(pendingAck.sentAt))
+	if found {
+		if pendingAck.sz < maxFrameSizeToCalculateRTT {
+			// it's okay to calculate RTT this way because ack frame is always sent
+			// back through the same subflow, and a data frame is never sent over
+			// the same subflow more than once.
+			sf.updateRTT(time.Since(pendingAck.sentAt))
+		}
 		delete(sf.pendingAcks, fn)
 	}
 }

@@ -18,8 +18,8 @@
 // frame carries acknowledgement to the frame just received. When one data
 // frame is not acked in time, it is sent over another subflow, until all
 // available subflows have been tried. Payload size and frame number uses
-// variable-length integer encoding as described here: https:
-// //tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
+// variable-length integer encoding as described here:
+// https://tools.ietf.org/html/draft-ietf-quic-transport-29#section-16
 //
 //       --------------------------------------------------------
 //      |  payload size(1-8)  |  frame number (1-8)  |  payload  |
@@ -43,7 +43,6 @@
 //      |  00000000  |  00000001  |
 //       -------------------------
 //
-
 package multipath
 
 import (
@@ -62,13 +61,15 @@ const (
 	frameTypePing  uint64 = 0
 	frameTypePong  uint64 = 1
 
-	maxFrameSizeToCalculateRTT int = 1500
-	leadBytesLength                = 1 + 16 // 1 byte version + 16 bytes CID
-	recieveQueueLength             = 4096
-	maxVarIntLength                = 8
-	probeInterval                  = time.Minute
-	longRTT                        = time.Minute
-	rttAlpha                       = 0.5 // this causes EMA to reflect changes more rapidly
+	maxFrameSizeToCalculateRTT uint64 = 1500
+	leadBytesLength                   = 1 + 16 // 1 byte version + 16 bytes CID
+	// Assuming an average 1KB frame size, it would be able to buffer 4MB of
+	// data without back pressure before the upper layer reads them.
+	recieveQueueLength = 4096
+	maxVarIntLength    = 8
+	probeInterval      = time.Minute
+	longRTT            = time.Minute
+	rttAlpha           = 0.5 // this causes EMA to reflect changes more rapidly
 )
 
 var (

@@ -11,28 +11,27 @@ import (
 
 // receiveQueue keeps received frames for the upper layer to read. It is
 // maintained as a ring buffer with fixed size. It takes advantage of the fact
-// that the frame number is consequential, so when a new frame arrives, it is
-// placed at the position indexed by the remainder of the frame number divided
-// by the buffer size.
+// that the frame number is sequential, so when a new frame arrives, it is
+// placed at buf[frameNumber % size].
 type receiveQueue struct {
 	buf  []frame
 	size uint64
 	// rp stands for read pointer, point to the index of the frame containing
 	// data yet to be read.
-	rp           uint64
-	cond         *sync.Cond
-	condAdd      *sync.Cond
-	readDeadline time.Time
-	closed       uint32 // 1 == true, 0 == false
+	rp             uint64
+	availableFrame *sync.Cond
+	availableSlot  *sync.Cond
+	readDeadline   time.Time
+	closed         uint32 // 1 == true, 0 == false
 }
 
 func newReceiveQueue(size int) *receiveQueue {
 	rq := &receiveQueue{
-		buf:     make([]frame, size),
-		size:    uint64(size),
-		rp:      minFrameNumber % uint64(size), // frame number starts with minFrameNumber, so should the read pointer
-		cond:    sync.NewCond(&sync.Mutex{}),
-		condAdd: sync.NewCond(&sync.Mutex{}),
+		buf:            make([]frame, size),
+		size:           uint64(size),
+		rp:             minFrameNumber % uint64(size), // frame number starts with minFrameNumber, so should the read pointer
+		availableFrame: sync.NewCond(&sync.Mutex{}),
+		availableSlot:  sync.NewCond(&sync.Mutex{}),
 	}
 	return rq
 }
@@ -42,7 +41,6 @@ func (rq *receiveQueue) add(f *frame) {
 		if rq.tryAdd(f) {
 			return
 		}
-		log.Error("would override unconsumed frame! wait for available slot")
 		if !rq.waitForSlot() {
 			pool.Put(f.bytes)
 			return
@@ -52,13 +50,13 @@ func (rq *receiveQueue) add(f *frame) {
 
 func (rq *receiveQueue) tryAdd(f *frame) bool {
 	idx := f.fn % rq.size
-	rq.cond.L.Lock()
-	defer rq.cond.L.Unlock()
+	rq.availableFrame.L.Lock()
+	defer rq.availableFrame.L.Unlock()
 	if rq.buf[idx].bytes == nil {
 		// empty slot
 		rq.buf[idx] = *f
 		if idx == rq.rp {
-			rq.cond.Signal()
+			rq.availableFrame.Signal()
 		}
 		return true
 	} else if rq.buf[idx].fn == f.fn {
@@ -70,9 +68,9 @@ func (rq *receiveQueue) tryAdd(f *frame) bool {
 }
 
 func (rq *receiveQueue) waitForSlot() bool {
-	rq.condAdd.L.Lock()
-	rq.condAdd.Wait()
-	rq.condAdd.L.Unlock()
+	rq.availableSlot.L.Lock()
+	rq.availableSlot.Wait()
+	rq.availableSlot.L.Unlock()
 	if atomic.LoadUint32(&rq.closed) == 1 {
 		return false
 	}
@@ -80,8 +78,8 @@ func (rq *receiveQueue) waitForSlot() bool {
 }
 
 func (rq *receiveQueue) read(b []byte) (int, error) {
-	rq.cond.L.Lock()
-	defer rq.cond.L.Unlock()
+	rq.availableFrame.L.Lock()
+	defer rq.availableFrame.L.Unlock()
 	for {
 		if rq.buf[rq.rp].bytes != nil {
 			break
@@ -92,13 +90,13 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		if rq.dlExceeded() {
 			return 0, context.DeadlineExceeded
 		}
-		rq.cond.Wait()
+		rq.availableFrame.Wait()
 	}
 	totalN := 0
 	for {
 		if rq.buf[rq.rp].bytes == nil {
 			if totalN > 0 {
-				rq.condAdd.Signal()
+				rq.availableSlot.Signal()
 				return totalN, nil
 			}
 			panic("should not happen")
@@ -116,22 +114,22 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		}
 		totalN += n
 		if totalN == len(b) {
-			rq.condAdd.Signal()
+			rq.availableSlot.Signal()
 			return totalN, nil
 		}
 	}
 }
 
 func (rq *receiveQueue) setReadDeadline(dl time.Time) {
-	rq.cond.L.Lock()
+	rq.availableFrame.L.Lock()
 	rq.readDeadline = dl
-	rq.cond.L.Unlock()
+	rq.availableFrame.L.Unlock()
 	if !dl.IsZero() {
 		ttl := dl.Sub(time.Now())
 		if ttl <= 0 {
-			rq.cond.Broadcast()
+			rq.availableFrame.Broadcast()
 		} else {
-			time.AfterFunc(ttl, rq.cond.Broadcast)
+			time.AfterFunc(ttl, rq.availableFrame.Broadcast)
 		}
 	}
 }
@@ -142,6 +140,6 @@ func (rq *receiveQueue) dlExceeded() bool {
 
 func (rq *receiveQueue) close() {
 	atomic.StoreUint32(&rq.closed, 1)
-	rq.cond.Broadcast()
-	rq.condAdd.Broadcast()
+	rq.availableFrame.Broadcast()
+	rq.availableSlot.Broadcast()
 }

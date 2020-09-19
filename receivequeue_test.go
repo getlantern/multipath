@@ -40,7 +40,7 @@ func TestRead(t *testing.T) {
 	}()
 	start := time.Now()
 	addFrame("abc")
-	assert.InDelta(t, time.Since(start), 50*time.Millisecond, float64(10*time.Millisecond),
+	assert.InDelta(t, time.Since(start), 50*time.Millisecond, float64(20*time.Millisecond),
 		"when receive queue is full, adding frame should wait for available slot")
 	shouldRead("abc")
 	shouldRead("abc")

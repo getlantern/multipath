@@ -93,18 +93,11 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 		rq.availableFrame.Wait()
 	}
 	totalN := 0
-	for {
-		if rq.buf[rq.rp].bytes == nil {
-			if totalN > 0 {
-				rq.availableSlot.Signal()
-				return totalN, nil
-			}
-			panic("should not happen")
-		}
-		cur := rq.buf[rq.rp].bytes
+	cur := rq.buf[rq.rp].bytes
+	for cur != nil && totalN < len(b) {
 		n := copy(b[totalN:], cur)
 		if n == len(cur) {
-			pool.Put(rq.buf[rq.rp].bytes)
+			pool.Put(cur)
 			rq.buf[rq.rp].bytes = nil
 			rq.rp = (rq.rp + 1) % rq.size
 		} else {
@@ -113,11 +106,10 @@ func (rq *receiveQueue) read(b []byte) (int, error) {
 			rq.buf[rq.rp].bytes = cur[n:]
 		}
 		totalN += n
-		if totalN == len(b) {
-			rq.availableSlot.Signal()
-			return totalN, nil
-		}
+		cur = rq.buf[rq.rp].bytes
 	}
+	rq.availableSlot.Signal()
+	return totalN, nil
 }
 
 func (rq *receiveQueue) setReadDeadline(dl time.Time) {

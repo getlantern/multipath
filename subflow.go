@@ -55,7 +55,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		sf.probeStart.Store(probeStart)
 	}
 	go func() {
-		if err := sf.readLoop(); err != nil {
+		if err := sf.readLoop(); err != nil && err != io.EOF {
 			log.Errorf("read loop to %s ended: %v", sf.to, err)
 		}
 	}()

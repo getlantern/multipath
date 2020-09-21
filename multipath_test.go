@@ -29,34 +29,42 @@ func TestE2E(t *testing.T) {
 		if !assert.NoError(t, err) {
 			continue
 		}
-		var lock sync.Mutex
-		listeners = append(listeners, &testListener{l, delayEnforcer{cond: sync.NewCond(&lock)}, l})
+		defer l.Close()
+		listeners = append(listeners, newTestListener(l, i))
 		trackers = append(trackers, NullTracker{})
 		// simulate one or more dialers to each listener
 		for j := 0; j <= rand.Intn(5); j++ {
-			var lock sync.Mutex
-			idx := len(dialers)
-			dialers = append(dialers, &testDialer{delayEnforcer{cond: sync.NewCond(&lock)}, l.Addr().String(), idx})
+			dialers = append(dialers, newTestDialer(l.Addr().String(), len(dialers)))
 		}
 	}
 	log.Debugf("Testing with %d listeners and %d dialers", len(listeners), len(dialers))
 	bl := NewListener(listeners, trackers)
+	defer bl.Close()
 	bd := NewDialer("endpoint", dialers)
 
 	go func() {
 		for {
 			conn, err := bl.Accept()
+			select {
+			case <-bl.(*mpListener).chClose:
+				return
+			default:
+			}
 			assert.NoError(t, err)
 			go func() {
-				b := make([]byte, 4)
+				defer conn.Close()
+				b := make([]byte, 10240)
 				for {
-					_, err := io.ReadFull(conn, b)
-					assert.NoError(t, err)
-					log.Debugf("server read '%v'", string(b))
-					n, err := conn.Write(b)
-					assert.NoError(t, err)
-					assert.Equal(t, 4, n)
-					log.Debugf("server written back '%v'", string(b))
+					n, err := conn.Read(b)
+					if err != nil {
+						return
+					}
+					log.Debugf("server read %d bytes", n)
+					n2, err := conn.Write(b[:n])
+					if err != nil {
+						return
+					}
+					log.Debugf("server wrote back %d bytes", n2)
 				}
 			}()
 		}
@@ -65,6 +73,7 @@ func TestE2E(t *testing.T) {
 	if !assert.NoError(t, err) {
 		return
 	}
+	defer conn.Close()
 	b := make([]byte, 4)
 	roundtrip := func() {
 		for i := 0; i < 10; i++ {
@@ -72,10 +81,10 @@ func TestE2E(t *testing.T) {
 			n, err := conn.Write(b)
 			assert.NoError(t, err)
 			assert.Equal(t, len(b), n)
-			log.Debugf("client written '%v'", string(b))
+			log.Debugf("client written '%s'", b)
 			_, err = io.ReadFull(conn, b)
 			assert.NoError(t, err)
-			log.Debugf("client read '%v'", string(b))
+			log.Debugf("client read '%s'", b)
 		}
 	}
 	roundtrip()
@@ -86,25 +95,55 @@ func TestE2E(t *testing.T) {
 		roundtrip()
 	}
 	for i := 0; i < len(dialers)-1; i++ {
-		log.Debugf("========dialer[%d] is hanging", i)
+		log.Debugf("========%s is hanging", dialers[i].Label())
 		dialers[i].(*testDialer).setDelay(time.Hour)
 		roundtrip()
 	}
-	log.Debug("========reenabled the first pair")
-	dialers[0].(*testDialer).setDelay(0)
+	log.Debugf("========reenabled listener #0 and %s", dialers[0].Label())
 	listeners[0].(*testListener).setDelay(0)
+	dialers[0].(*testDialer).setDelay(0)
 	log.Debug("========the last listener is hanging")
 	listeners[len(listeners)-1].(*testListener).setDelay(time.Hour)
 	roundtrip()
+	log.Debugf("========%s is hanging", dialers[len(dialers)-1].Label())
 	dialers[len(dialers)-1].(*testDialer).setDelay(time.Hour)
-	log.Debug("========the last dialer is hanging")
 	roundtrip()
+
+	log.Debugf("========Now test writing and reading back tons of data")
+	b2 := make([]byte, 81920)
+	b3 := make([]byte, 81920)
+	rand.Read(b2)
+	for i := 0; i < 10; i++ {
+		n, err := conn.Write(b2[:rand.Intn(len(b2))])
+		assert.NoError(t, err)
+		log.Debugf("client wrote %d bytes", n)
+		_, err = io.ReadFull(conn, b3[:n])
+		assert.NoError(t, err)
+		assert.EqualValues(t, b2[:n], b3[:n])
+	}
+
+	// wake up all sleeping goroutines to clean up resources
+	for i := 0; i < len(listeners); i++ {
+		listeners[i].(*testListener).setDelay(0)
+	}
+	for i := 0; i < len(dialers); i++ {
+		dialers[i].(*testDialer).setDelay(0)
+	}
 }
 
 type testDialer struct {
 	delayEnforcer
 	addr string
 	idx  int
+}
+
+func newTestDialer(addr string, idx int) *testDialer {
+	var lock sync.Mutex
+	td := &testDialer{
+		delayEnforcer{cond: sync.NewCond(&lock)}, addr, idx,
+	}
+	td.delayEnforcer.name = td.Label()
+	return td
 }
 
 func (td *testDialer) DialContext(ctx context.Context) (net.Conn, error) {
@@ -124,6 +163,13 @@ type testListener struct {
 	net.Listener
 	delayEnforcer
 	l net.Listener
+}
+
+func newTestListener(l net.Listener, idx int) *testListener {
+	var lock sync.Mutex
+	tl := &testListener{l, delayEnforcer{cond: sync.NewCond(&lock)}, l}
+	tl.delayEnforcer.name = fmt.Sprintf("listener %d", idx)
+	return tl
 }
 
 func (tl *testListener) Accept() (net.Conn, error) {
@@ -163,12 +209,14 @@ func TestDelayEnforcer(t *testing.T) {
 }
 
 type delayEnforcer struct {
+	name  string
 	delay int64
 	cond  *sync.Cond
 }
 
 func (e *delayEnforcer) setDelay(d time.Duration) {
 	atomic.StoreInt64(&e.delay, int64(d))
+	log.Debugf("%s delay is set to %v", e.name, d)
 	e.cond.Broadcast()
 }
 
@@ -178,11 +226,12 @@ func (e *delayEnforcer) sleep() {
 	for {
 		d := atomic.LoadInt64(&e.delay)
 		if delay := time.Duration(d); delay > 0 {
-			log.Debugf("sleep for %v", delay)
+			log.Debugf("%s sleep for %v", e.name, delay)
 			time.AfterFunc(delay, func() {
 				e.cond.Broadcast()
 			})
 			e.cond.Wait()
+			log.Debugf("%s done sleeping", e.name)
 		} else {
 			return
 		}

@@ -28,12 +28,11 @@ func (bc *mpConn) Read(b []byte) (n int, err error) {
 }
 
 func (bc *mpConn) Write(b []byte) (n int, err error) {
-	sorted := bc.sortedSubflows()
-	if len(sorted) == 0 {
-		return 0, ErrClosed
+	for _, sf := range bc.sortedSubflows() {
+		sf.sendQueue <- composeFrame(atomic.AddUint64(&bc.lastFN, 1), b)
+		return len(b), nil
 	}
-	sorted[0].sendQueue <- composeFrame(atomic.AddUint64(&bc.lastFN, 1), b)
-	return len(b), nil
+	return 0, ErrClosed
 }
 
 func (bc *mpConn) Close() error {
@@ -109,7 +108,7 @@ func (bc *mpConn) sortedSubflows() []*subflow {
 	copy(subflows, bc.subflows)
 	bc.muSubflows.RUnlock()
 	sort.Slice(subflows, func(i, j int) bool {
-		return subflows[i].emaRTT.GetDuration() < subflows[j].emaRTT.GetDuration()
+		return subflows[i].getRTT() < subflows[j].getRTT()
 	})
 	return subflows
 }

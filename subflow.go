@@ -190,11 +190,11 @@ func (sf *subflow) gotACK(fn uint64) {
 	defer sf.muPendingAcks.Unlock()
 	e := sf.pendingAcks.Front()
 	if e == nil {
-		panic("unsolicited ack")
+		panic(fmt.Sprintf("unsolicited ack for frame %d", fn))
 	}
 	pending := e.Value.(pendingAck)
 	if pending.fn != fn {
-		panic("unsolicited ack")
+		panic(fmt.Sprintf("unsolicited ack for frame %d, expect %d", fn, pending.fn))
 	}
 	log.Tracef("got ack for frame %d from %s.", fn, sf.to)
 	sf.pendingAcks.Remove(e)

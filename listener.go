@@ -113,7 +113,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 		}
 	}
 	mpl.muMPConns.Unlock()
-	bc.add(fmt.Sprintf("%x(%s)", cid, conn.RemoteAddr().String()), conn, false, probeStart, st)
+	bc.add(fmt.Sprintf("%x(%s)", cid, conn.LocalAddr().String()), conn, false, probeStart, st)
 	if newConn {
 		mpl.chNextAccepted <- bc
 	}

@@ -70,7 +70,6 @@ func (sf *subflow) readLoop() (err error) {
 		defer close(ch)
 		for {
 			var sz, fn uint64
-			var n int
 			sz, err = ReadVarInt(r)
 			if err != nil {
 				sf.close()
@@ -86,15 +85,17 @@ func (sf *subflow) readLoop() (err error) {
 				continue
 			}
 			log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
+			if sz > 1<<20 {
+				log.Errorf("Frame of size %v from %s is impossible", sz, sf.to)
+				sf.close()
+				return
+			}
 			buf := pool.Get(int(sz))
-			n, err = io.ReadFull(r, buf)
+			_, err = io.ReadFull(r, buf)
 			if err != nil {
 				pool.Put(buf)
 				sf.close()
 				return
-			}
-			if n != int(sz) {
-				panic(fmt.Sprintf("expect to read %d bytes, read %d", sz, n))
 			}
 			sf.ack(fn)
 			ch <- &frame{fn: fn, bytes: buf}
@@ -181,6 +182,7 @@ func (sf *subflow) ack(fn uint64) {
 }
 
 func (sf *subflow) gotACK(fn uint64) {
+	log.Tracef("got ack for frame %d from %s", fn, sf.to)
 	if fn == frameTypePing {
 		log.Tracef("pong to %s", sf.to)
 		sf.ack(frameTypePong)
@@ -190,13 +192,16 @@ func (sf *subflow) gotACK(fn uint64) {
 	defer sf.muPendingAcks.Unlock()
 	e := sf.pendingAcks.Front()
 	if e == nil {
-		panic(fmt.Sprintf("unsolicited ack for frame %d", fn))
+		log.Errorf("unsolicited ack for frame %d from %s", fn, sf.to)
+		sf.close()
+		return
 	}
 	pending := e.Value.(pendingAck)
 	if pending.fn != fn {
-		panic(fmt.Sprintf("unsolicited ack for frame %d, expect %d", fn, pending.fn))
+		log.Errorf("unsolicited ack for frame %d from %s, expect %d", fn, sf.to, pending.fn)
+		sf.close()
+		return
 	}
-	log.Tracef("got ack for frame %d from %s.", fn, sf.to)
 	sf.pendingAcks.Remove(e)
 	if pending.sz < maxFrameSizeToCalculateRTT {
 		// it's okay to calculate RTT this way because ack frame is always sent

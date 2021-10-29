@@ -82,17 +82,19 @@ var (
 )
 
 type connectionID uuid.UUID
-type frame struct {
+type rxFrame struct {
 	fn    uint64
 	bytes []byte
 }
 
 type sendFrame struct {
-	fn              uint64
-	sz              uint64
-	buf             []byte
-	released        *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
-	retransmissions int
+	fn                 uint64
+	sz                 uint64
+	buf                []byte
+	released           *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
+	retransmissions    int
+	sentVia            []*subflow // TODO!!!! Nil if it's not been retransmitted yet, otherwise contains the subflows it's already been written to.
+	beingRetransmitted uint64
 }
 
 func composeFrame(fn uint64, b []byte) *sendFrame {
@@ -115,8 +117,6 @@ func (f *sendFrame) isDataFrame() bool {
 func (f *sendFrame) release() {
 	if atomic.CompareAndSwapInt32(f.released, 0, 1) {
 		pool.Put(f.buf)
-	} else {
-		log.Error("Release already released buffer!")
 	}
 }
 
@@ -135,3 +135,44 @@ func (st NullTracker) OnRecv(uint64)           {}
 func (st NullTracker) OnSent(uint64)           {}
 func (st NullTracker) OnRetransmit(uint64)     {}
 func (st NullTracker) UpdateRTT(time.Duration) {}
+
+// ben debug
+
+type Counter struct {
+	RX, TX uint64
+}
+
+type DevZero struct {
+	C *Counter
+}
+
+func (D DevZero) Write(b []byte) (int, error) {
+	before := D.C.RX
+	D.C.RX += uint64(len(b))
+	if before/1e8 != D.C.RX/1e8 {
+		log.Debugf("RX'd %d bytes", D.C.RX)
+		if before/1e8 == 10 {
+			time.Sleep(time.Second * 10)
+		}
+	}
+	return len(b), nil
+}
+
+func (D DevZero) Read(b []byte) (int, error) {
+	for k := range b {
+		b[k] = 0x00
+	}
+
+	// transmitted := rand.Intn(4096)
+	transmitted := len(b)
+	if len(b) < transmitted {
+		transmitted = len(b)
+	}
+
+	before := D.C.TX
+	D.C.TX += uint64(transmitted)
+	if before/1e8 != D.C.TX/1e8 {
+		log.Debugf("TX'd %d bytes", D.C.TX)
+	}
+	return transmitted, nil
+}

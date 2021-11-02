@@ -88,11 +88,12 @@ type frame struct {
 }
 
 type sendFrame struct {
-	fn              uint64
-	sz              uint64
-	buf             []byte
-	released        *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
-	retransmissions int
+	fn                 uint64
+	sz                 uint64
+	buf                []byte
+	released           *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
+	retransmissions    int
+	beingRetransmitted uint64
 }
 
 func composeFrame(fn uint64, b []byte) *sendFrame {

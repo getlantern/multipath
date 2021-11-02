@@ -137,8 +137,20 @@ func (sf *subflow) sendLoop() {
 		case <-sf.chClose:
 			return
 		case frame := <-sf.sendQueue:
+			if *frame.released == 1 {
+				log.Errorf("Tried to send a frame that has already been released! Frame Number: %v", frame.fn)
+				continue
+			}
+
 			sf.addPendingAck(frame)
 			n, err := sf.conn.Write(frame.buf)
+
+			// only wake up one re-transmitter, to better control the possible hored of them
+			select {
+			case sf.mpc.tryRetransmit <- true:
+			default:
+			}
+
 			if err != nil {
 				log.Debugf("failed to write frame %d to %s: %v", frame.fn, sf.to, err)
 				// TODO: For temporary errors, maybe send the subflow to the
@@ -162,18 +174,6 @@ func (sf *subflow) sendLoop() {
 			} else {
 				sf.tracker.OnRetransmit(frame.sz)
 			}
-			d := sf.retransTimer()
-			time.AfterFunc(d, func() {
-				if sf.isPendingAck(frame.fn) {
-					// No ack means the subflow fails or has a longer RTT
-					sf.updateRTT(d)
-					sf.mpc.retransmit(frame)
-				} else {
-					// It is ok to release buffer here as the frame will never
-					// be retransmitted again.
-					frame.release()
-				}
-			})
 		}
 	}
 }

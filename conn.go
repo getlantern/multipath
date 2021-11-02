@@ -9,12 +9,13 @@ import (
 )
 
 type mpConn struct {
-	cid        connectionID
-	lastFN     uint64
-	subflows   []*subflow
-	muSubflows sync.RWMutex
-	recvQueue  *receiveQueue
-	closed     uint32 // 1 == true, 0 == false
+	cid           connectionID
+	lastFN        uint64
+	subflows      []*subflow
+	muSubflows    sync.RWMutex
+	recvQueue     *receiveQueue
+	closed        uint32 // 1 == true, 0 == false
+	tryRetransmit chan bool
 
 	pendingAckMap map[uint64]*pendingAck
 	pendingAckMu  *sync.RWMutex
@@ -24,6 +25,7 @@ func newMPConn(cid connectionID) *mpConn {
 	return &mpConn{cid: cid,
 		lastFN:        minFrameNumber - 1,
 		recvQueue:     newReceiveQueue(recieveQueueLength),
+		tryRetransmit: make(chan bool, 1),
 		pendingAckMap: make(map[uint64]*pendingAck),
 		pendingAckMu:  &sync.RWMutex{},
 	}
@@ -98,22 +100,50 @@ func (bc *mpConn) SetWriteDeadline(t time.Time) error {
 }
 
 func (bc *mpConn) retransmit(frame *sendFrame) {
-	frame.retransmissions++
+	if atomic.LoadUint64(&frame.beingRetransmitted) == 1 {
+		return
+	}
+	atomic.StoreUint64(&frame.beingRetransmitted, 1)
+	defer func() {
+		atomic.StoreUint64(&frame.beingRetransmitted, 0)
+	}()
+
 	subflows := bc.sortedSubflows()
-	for _, sf := range subflows {
-		// choose the first subflow not waiting ack for this frame
-		if !sf.isPendingAck(frame.fn) {
+	// ticker := time.NewTimer(time.Minute)
+
+	if frame.retransmissions > 4 {
+		frame.isDataFrame() // debugging point, sorry this can be removed in prod
+	}
+
+	alreadyTransmittedOnAllSubflows := false
+	for {
+		abort := false
+		if bc.closed == 1 {
+			return
+		}
+
+		for _, sf := range subflows {
 			select {
 			case <-sf.chClose:
-				// continue
+				continue
 			case sf.sendQueue <- frame:
+				frame.retransmissions++
 				log.Tracef("retransmitted frame %d via %s", frame.fn, sf.to)
 				return
+			default:
 			}
 		}
+		if abort {
+			break
+		}
+		<-bc.tryRetransmit
 	}
-	log.Tracef("frame %d is being retransmitted on all subflows of %x, give up", frame.fn, bc.cid)
-	frame.release()
+
+	if !alreadyTransmittedOnAllSubflows {
+		log.Debugf("frame %d is being retransmitted on all subflows of %x", frame.fn, bc.cid)
+	}
+
+	// frame.release() // Commented out since it's not clear that this is needed anymore.
 	return
 }
 
@@ -148,4 +178,60 @@ func (bc *mpConn) remove(theSubflow *subflow) {
 	if left == 0 {
 		bc.close()
 	}
+}
+
+func (bc *mpConn) retransmitLoop() {
+	evalTick := time.NewTicker(time.Millisecond * 100)
+	for {
+		select {
+		case <-evalTick.C:
+		}
+		if bc.closed == 1 {
+			return
+		}
+
+		bc.pendingAckMu.RLock()
+		RetransmitFrames := make([]pendingAck, 0)
+		for fn, frame := range bc.pendingAckMap {
+			if time.Since(frame.sentAt) > frame.outboundSf.retransTimer() {
+				if bc.pendingAckMap[fn] != nil {
+					RetransmitFrames = append(RetransmitFrames, *frame)
+				}
+			}
+		}
+		bc.pendingAckMu.RUnlock()
+
+		sort.Slice(RetransmitFrames, func(i, j int) bool {
+			return RetransmitFrames[i].fn < RetransmitFrames[j].fn
+		})
+
+		for _, frame := range RetransmitFrames {
+			sendframe := frame.framePtr
+			if bc.isPendingAck(frame.fn) {
+				// No ack means the subflow fails or has a longer RTT
+				// log.Errorf("Retransmitting! %#v", frame.fn)
+				if sendframe.beingRetransmitted == 0 {
+					go bc.retransmit(sendframe)
+				}
+			} else {
+				// It is ok to release buffer here as the frame will never
+				// be retransmitted again.
+				sendframe.release()
+				bc.pendingAckMu.Lock()
+				delete(bc.pendingAckMap, frame.fn)
+				bc.pendingAckMu.Unlock()
+			}
+		}
+
+	}
+}
+
+func (bc *mpConn) isPendingAck(fn uint64) bool {
+	if fn > minFrameNumber {
+		bc.pendingAckMu.RLock()
+		defer bc.pendingAckMu.RUnlock()
+		return bc.pendingAckMap[fn] != nil
+	}
+	return false
+
 }

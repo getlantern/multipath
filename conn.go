@@ -9,13 +9,14 @@ import (
 )
 
 type mpConn struct {
-	cid           connectionID
-	lastFN        uint64
-	subflows      []*subflow
-	muSubflows    sync.RWMutex
-	recvQueue     *receiveQueue
-	closed        uint32 // 1 == true, 0 == false
-	tryRetransmit chan bool
+	cid              connectionID
+	lastFN           uint64
+	subflows         []*subflow
+	muSubflows       sync.RWMutex
+	recvQueue        *receiveQueue
+	closed           uint32 // 1 == true, 0 == false
+	writerMaybeReady chan bool
+	tryRetransmit    chan bool
 
 	pendingAckMap map[uint64]*pendingAck
 	pendingAckMu  *sync.RWMutex
@@ -23,11 +24,12 @@ type mpConn struct {
 
 func newMPConn(cid connectionID) *mpConn {
 	return &mpConn{cid: cid,
-		lastFN:        minFrameNumber - 1,
-		recvQueue:     newReceiveQueue(recieveQueueLength),
-		tryRetransmit: make(chan bool, 1),
-		pendingAckMap: make(map[uint64]*pendingAck),
-		pendingAckMu:  &sync.RWMutex{},
+		lastFN:           minFrameNumber - 1,
+		recvQueue:        newReceiveQueue(recieveQueueLength),
+		writerMaybeReady: make(chan bool, 1),
+		tryRetransmit:    make(chan bool, 1),
+		pendingAckMap:    make(map[uint64]*pendingAck),
+		pendingAckMu:     &sync.RWMutex{},
 	}
 }
 func (bc *mpConn) Read(b []byte) (n int, err error) {

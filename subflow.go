@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/ema"
@@ -25,13 +26,14 @@ type subflow struct {
 	conn net.Conn
 	mpc  *mpConn
 
-	chClose       chan struct{}
-	closeOnce     sync.Once
-	sendQueue     chan *sendFrame
-	pendingPing   *pendingAck // Only for pings
-	muPendingPing sync.RWMutex
-	emaRTT        *ema.EMA
-	tracker       StatsTracker
+	chClose             chan struct{}
+	closeOnce           sync.Once
+	sendQueue           chan *sendFrame
+	pendingPing         *pendingAck // Only for pings
+	muPendingPing       sync.RWMutex
+	emaRTT              *ema.EMA
+	tracker             StatsTracker
+	actuallyBusyOnWrite uint64
 }
 
 func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker StatsTracker) *subflow {
@@ -149,13 +151,36 @@ func (sf *subflow) sendLoop() {
 		case <-sf.chClose:
 			return
 		case frame := <-sf.sendQueue:
+			if frame.retransmissions != 0 {
+				log.Tracef("Retransmit on %d, for the %dth time", frame.fn, frame.retransmissions)
+			}
 			if *frame.released == 1 {
 				log.Errorf("Tried to send a frame that has already been released! Frame Number: %v", frame.fn)
+				sf.mpc.writerMaybeReady <- true
 				continue
 			}
-
+			if frame.sentVia == nil {
+				frame.sentVia = make([]transmissionDatapoint, 0)
+			}
+			frame.sentVia = append(frame.sentVia, transmissionDatapoint{sf, time.Now()})
 			sf.addPendingAck(frame)
+
+			atomic.StoreUint64(&sf.actuallyBusyOnWrite, 1)
 			n, err := sf.conn.Write(frame.buf)
+			atomic.StoreUint64(&sf.actuallyBusyOnWrite, 0)
+			var abort bool
+			for {
+				// wake all writers up, since they might have something to send now that we likely
+				// have free capacity.
+				select {
+				case sf.mpc.writerMaybeReady <- true:
+				default:
+					abort = true
+				}
+				if abort {
+					break
+				}
+			}
 
 			// only wake up one re-transmitter, to better control the possible hored of them
 			select {
@@ -165,14 +190,23 @@ func (sf *subflow) sendLoop() {
 
 			if err != nil {
 				log.Debugf("failed to write frame %d to %s: %v", frame.fn, sf.to, err)
-				// TODO: For temporary errors, maybe send the subflow to the
-				// back of the line instead of closing it.
-				sf.close()
+
 				if frame.isDataFrame() {
 					go sf.mpc.retransmit(frame)
 				}
+
+				if n != 0 && len(frame.buf) != n {
+					log.Tracef("We may have corrupted the output %#v vs %#v", n, len(frame.buf))
+					// In this case, we will not try and write the remaining, and instead we will assume
+					// that writing to the socket again will only make this worse, so aborting the subflow
+					sf.close()
+					return
+				}
+
+				sf.close()
 				return
 			}
+
 			if n != len(frame.buf) {
 				panic(fmt.Sprintf("expect to write %d bytes on %s, written %d", len(frame.buf), sf.to, n))
 			}

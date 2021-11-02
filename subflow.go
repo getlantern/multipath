@@ -198,7 +198,6 @@ func (sf *subflow) gotACK(fn uint64) {
 		delete(sf.mpc.pendingAckMap, fn)
 		sf.mpc.pendingAckMu.Unlock()
 	} else {
-		log.Errorf("unsolicited ack for frame %d from %s", fn, sf.to)
 		sf.mpc.pendingAckMu.RUnlock()
 		return
 	}

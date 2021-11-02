@@ -15,12 +15,17 @@ type mpConn struct {
 	muSubflows sync.RWMutex
 	recvQueue  *receiveQueue
 	closed     uint32 // 1 == true, 0 == false
+
+	pendingAckMap map[uint64]*pendingAck
+	pendingAckMu  *sync.RWMutex
 }
 
 func newMPConn(cid connectionID) *mpConn {
 	return &mpConn{cid: cid,
-		lastFN:    minFrameNumber - 1,
-		recvQueue: newReceiveQueue(recieveQueueLength),
+		lastFN:        minFrameNumber - 1,
+		recvQueue:     newReceiveQueue(recieveQueueLength),
+		pendingAckMap: make(map[uint64]*pendingAck),
+		pendingAckMu:  &sync.RWMutex{},
 	}
 }
 func (bc *mpConn) Read(b []byte) (n int, err error) {

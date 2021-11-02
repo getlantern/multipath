@@ -1,7 +1,6 @@
 package multipath
 
 import (
-	"container/list"
 	"fmt"
 	"io"
 	"math/rand"
@@ -26,8 +25,8 @@ type subflow struct {
 	chClose       chan struct{}
 	closeOnce     sync.Once
 	sendQueue     chan *sendFrame
-	pendingAcks   *list.List
-	muPendingAcks sync.RWMutex
+	pendingPing   *pendingAck // Only for pings
+	muPendingPing sync.RWMutex
 	emaRTT        *ema.EMA
 	tracker       StatsTracker
 }
@@ -39,7 +38,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		mpc:         mpc,
 		chClose:     make(chan struct{}),
 		sendQueue:   make(chan *sendFrame),
-		pendingAcks: list.New(),
+		pendingPing: nil,
 		emaRTT:      ema.NewDuration(longRTT, rttAlpha),
 		tracker:     tracker,
 	}
@@ -53,7 +52,9 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		sf.ack(frameTypePong)
 	} else {
 		// server side subflow expects a pong frame to calculate RTT.
-		sf.pendingAcks.PushBack(pendingAck{frameTypePong, 0, probeStart})
+		sf.muPendingPing.Lock()
+		sf.pendingPing = &pendingAck{frameTypePong, 0, probeStart}
+		sf.muPendingPing.Unlock()
 	}
 	go func() {
 		if err := sf.readLoop(); err != nil && err != io.EOF {
@@ -188,21 +189,20 @@ func (sf *subflow) gotACK(fn uint64) {
 		sf.ack(frameTypePong)
 		return
 	}
-	sf.muPendingAcks.Lock()
-	defer sf.muPendingAcks.Unlock()
-	e := sf.pendingAcks.Front()
-	if e == nil {
+
+	sf.mpc.pendingAckMu.RLock()
+	pending := sf.mpc.pendingAckMap[fn]
+	if sf.mpc.pendingAckMap[fn] != nil {
+		sf.mpc.pendingAckMu.RUnlock()
+		sf.mpc.pendingAckMu.Lock()
+		delete(sf.mpc.pendingAckMap, fn)
+		sf.mpc.pendingAckMu.Unlock()
+	} else {
 		log.Errorf("unsolicited ack for frame %d from %s", fn, sf.to)
-		sf.close()
+		sf.mpc.pendingAckMu.RUnlock()
 		return
 	}
-	pending := e.Value.(pendingAck)
-	if pending.fn != fn {
-		log.Errorf("unsolicited ack for frame %d from %s, expect %d", fn, sf.to, pending.fn)
-		sf.close()
-		return
-	}
-	sf.pendingAcks.Remove(e)
+
 	if pending.sz < maxFrameSizeToCalculateRTT {
 		// it's okay to calculate RTT this way because ack frame is always sent
 		// back through the same subflow, and a data frame is never sent over
@@ -223,12 +223,9 @@ func (sf *subflow) getRTT() time.Duration {
 	// time since the earliest yet-to-be-acknowledged frame being sent is more
 	// up-to-date.
 	var realtime time.Duration
-	sf.muPendingAcks.RLock()
-	if e := sf.pendingAcks.Front(); e != nil {
-		pending := e.Value.(pendingAck)
-		realtime = time.Since(pending.sentAt)
-	}
-	sf.muPendingAcks.RUnlock()
+	sf.muPendingPing.RLock()
+	realtime = time.Since(sf.pendingPing.sentAt)
+	sf.muPendingPing.RUnlock()
 	if realtime > recorded {
 		return realtime
 	} else {
@@ -237,29 +234,28 @@ func (sf *subflow) getRTT() time.Duration {
 }
 
 func (sf *subflow) addPendingAck(frame *sendFrame) {
-	sf.muPendingAcks.Lock()
 	switch frame.fn {
 	case frameTypePing:
 		// we expect pong for ping
-		sf.pendingAcks.PushBack(pendingAck{frameTypePong, 0, time.Now()})
+		sf.muPendingPing.Lock()
+		sf.pendingPing = &pendingAck{frameTypePong, 0, time.Now()}
+		sf.muPendingPing.Unlock()
 	case frameTypePong:
 		// expect no response for pong
 	default:
 		if frame.isDataFrame() {
-			sf.pendingAcks.PushBack(pendingAck{frame.fn, frame.sz, time.Now()})
+			sf.mpc.pendingAckMu.Lock()
+			sf.mpc.pendingAckMap[frame.fn] = &pendingAck{frame.fn, frame.sz, time.Now()}
+			sf.mpc.pendingAckMu.Unlock()
 		}
 	}
-	sf.muPendingAcks.Unlock()
-
 }
 
 func (sf *subflow) isPendingAck(fn uint64) bool {
-	sf.muPendingAcks.RLock()
-	defer sf.muPendingAcks.RUnlock()
-	for e := sf.pendingAcks.Front(); e != nil; e = e.Next() {
-		if e.Value.(pendingAck).fn == fn {
-			return true
-		}
+	if fn > minFrameNumber {
+		sf.mpc.pendingAckMu.RLock()
+		defer sf.mpc.pendingAckMu.RUnlock()
+		return sf.mpc.pendingAckMap[fn] != nil
 	}
 	return false
 }

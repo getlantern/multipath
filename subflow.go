@@ -119,7 +119,7 @@ func (sf *subflow) readLoop() (err error) {
 			if frame == nil {
 				return
 			}
-			sf.mpc.recvQueue.add(frame)
+			sf.mpc.recvQueue.add(frame, sf)
 			if !probeTimer.Stop() {
 				<-probeTimer.C
 			}

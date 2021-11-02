@@ -13,10 +13,13 @@ import (
 )
 
 type pendingAck struct {
-	fn     uint64
-	sz     uint64
-	sentAt time.Time
+	fn         uint64
+	sz         uint64
+	sentAt     time.Time
+	outboundSf *subflow
+	framePtr   *sendFrame
 }
+
 type subflow struct {
 	to   string
 	conn net.Conn
@@ -53,7 +56,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 	} else {
 		// server side subflow expects a pong frame to calculate RTT.
 		sf.muPendingPing.Lock()
-		sf.pendingPing = &pendingAck{frameTypePong, 0, probeStart}
+		sf.pendingPing = &pendingAck{frameTypePong, 0, probeStart, sf, nil}
 		sf.muPendingPing.Unlock()
 	}
 	go func() {
@@ -202,11 +205,10 @@ func (sf *subflow) gotACK(fn uint64) {
 		return
 	}
 
-	if pending.sz < maxFrameSizeToCalculateRTT {
-		// it's okay to calculate RTT this way because ack frame is always sent
-		// back through the same subflow, and a data frame is never sent over
-		// the same subflow more than once.
-		sf.updateRTT(time.Since(pending.sentAt))
+	if time.Since(pending.sentAt) < time.Second {
+		pending.outboundSf.updateRTT(time.Since(pending.sentAt))
+	} else {
+		pending.outboundSf.updateRTT(time.Second)
 	}
 }
 
@@ -237,14 +239,14 @@ func (sf *subflow) addPendingAck(frame *sendFrame) {
 	case frameTypePing:
 		// we expect pong for ping
 		sf.muPendingPing.Lock()
-		sf.pendingPing = &pendingAck{frameTypePong, 0, time.Now()}
+		sf.pendingPing = &pendingAck{frameTypePong, 0, time.Now(), sf, nil}
 		sf.muPendingPing.Unlock()
 	case frameTypePong:
 		// expect no response for pong
 	default:
 		if frame.isDataFrame() {
 			sf.mpc.pendingAckMu.Lock()
-			sf.mpc.pendingAckMap[frame.fn] = &pendingAck{frame.fn, frame.sz, time.Now()}
+			sf.mpc.pendingAckMap[frame.fn] = &pendingAck{frame.fn, frame.sz, time.Now(), sf, frame}
 			sf.mpc.pendingAckMu.Unlock()
 		}
 	}

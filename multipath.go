@@ -123,8 +123,6 @@ func (f *sendFrame) isDataFrame() bool {
 func (f *sendFrame) release() {
 	if atomic.CompareAndSwapInt32(f.released, 0, 1) {
 		pool.Put(f.buf)
-	} else {
-		log.Error("Release already released buffer!")
 	}
 }
 

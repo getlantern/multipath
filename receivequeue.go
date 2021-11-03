@@ -33,7 +33,7 @@ func newReceiveQueue(size int) *receiveQueue {
 		buf:                   make([]rxFrame, size),
 		size:                  uint64(size),
 		rp:                    minFrameNumber % uint64(size), // frame number starts with minFrameNumber, so should the read pointer
-		availableFrameChannel: make(chan bool),
+		availableFrameChannel: make(chan bool, 1),
 		readNotifyChannel:     make(chan bool),
 		readLockmaybeidk:      &sync.Mutex{},
 	}
@@ -109,6 +109,10 @@ func (rq *receiveQueue) isFull() bool {
 			if printFull {
 				log.Tracef("receiveQueue is %d%% full! (%d/%d)", int((float32(i) / float32(rq.size) * 100)), i, rq.size)
 			}
+			return false
+		}
+
+		if rq.buf[idx].bytes == nil {
 			return false
 		}
 

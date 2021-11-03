@@ -8,7 +8,6 @@ import (
 )
 
 func TestRead(t *testing.T) {
-	// does this work? ?
 	q := newReceiveQueue(2)
 	fn := uint64(minFrameNumber - 1)
 	addFrame := func(s string) {

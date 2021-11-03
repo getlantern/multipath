@@ -272,7 +272,12 @@ func (sf *subflow) getRTT() time.Duration {
 	// up-to-date.
 	var realtime time.Duration
 	sf.muPendingPing.RLock()
-	realtime = time.Since(sf.pendingPing.sentAt)
+	if sf.pendingPing != nil {
+		realtime = time.Since(sf.pendingPing.sentAt)
+	} else {
+		sf.muPendingPing.RUnlock()
+		return recorded
+	}
 	sf.muPendingPing.RUnlock()
 	if realtime > recorded {
 		return realtime

@@ -82,7 +82,8 @@ var (
 )
 
 type connectionID uuid.UUID
-type frame struct {
+
+type rxFrame struct {
 	fn    uint64
 	bytes []byte
 }

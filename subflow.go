@@ -38,11 +38,12 @@ type subflow struct {
 
 func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker StatsTracker) *subflow {
 	sf := &subflow{
-		to:          to,
-		conn:        c,
-		mpc:         mpc,
-		chClose:     make(chan struct{}),
-		sendQueue:   make(chan *sendFrame, 1),
+		to:        to,
+		conn:      c,
+		mpc:       mpc,
+		chClose:   make(chan struct{}),
+		sendQueue: make(chan *sendFrame, 1),
+		// pendingPing is used for storing the subflow's ping data. Handy since pings are subflow dependent
 		pendingPing: nil,
 		emaRTT:      ema.NewDuration(longRTT, rttAlpha),
 		tracker:     tracker,

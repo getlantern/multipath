@@ -42,7 +42,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		conn:        c,
 		mpc:         mpc,
 		chClose:     make(chan struct{}),
-		sendQueue:   make(chan *sendFrame),
+		sendQueue:   make(chan *sendFrame, 1),
 		pendingPing: nil,
 		emaRTT:      ema.NewDuration(longRTT, rttAlpha),
 		tracker:     tracker,

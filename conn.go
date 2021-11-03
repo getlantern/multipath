@@ -41,19 +41,35 @@ func (bc *mpConn) Read(b []byte) (n int, err error) {
 func (bc *mpConn) Write(b []byte) (n int, err error) {
 	frame := composeFrame(atomic.AddUint64(&bc.lastFN, 1), b)
 
-	for _, sf := range bc.sortedSubflows() {
-		select {
-		case sf.sendQueue <- frame:
-			return len(b), nil
-		default:
+	for {
+		bc.pendingAckMu.RLock()
+		inflight := len(bc.pendingAckMap)
+		bc.pendingAckMu.RUnlock()
+		if inflight > 500 {
+			time.Sleep(time.Millisecond * 100)
+			log.Tracef("too many inflights")
+			continue
 		}
-	}
 
-	for _, sf := range bc.sortedSubflows() {
-		sf.sendQueue <- frame
-		return len(b), nil
+		for _, sf := range bc.sortedSubflows() {
+
+			if atomic.LoadUint64(&sf.actuallyBusyOnWrite) == 1 {
+				// Avoid a possibly blocked writer for a retransmit
+				continue
+			}
+
+			select {
+			case sf.sendQueue <- frame:
+				return len(b), nil
+			default:
+			}
+		}
+		if len(bc.sortedSubflows()) == 0 {
+			return 0, ErrClosed
+		}
+
+		<-bc.writerMaybeReady
 	}
-	return 0, ErrClosed
 }
 
 func (bc *mpConn) Close() error {

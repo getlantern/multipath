@@ -23,7 +23,7 @@ type mpConn struct {
 }
 
 func newMPConn(cid connectionID) *mpConn {
-	return &mpConn{cid: cid,
+	mpc := &mpConn{cid: cid,
 		lastFN:           minFrameNumber - 1,
 		recvQueue:        newReceiveQueue(recieveQueueLength),
 		writerMaybeReady: make(chan bool, 1),
@@ -31,6 +31,8 @@ func newMPConn(cid connectionID) *mpConn {
 		pendingAckMap:    make(map[uint64]*pendingAck),
 		pendingAckMu:     &sync.RWMutex{},
 	}
+	go mpc.retransmitLoop()
+	return mpc
 }
 func (bc *mpConn) Read(b []byte) (n int, err error) {
 	return bc.recvQueue.read(b)

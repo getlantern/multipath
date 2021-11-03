@@ -81,7 +81,7 @@ func (rq *receiveQueue) add(f *rxFrame, sf *subflow) {
 		}
 	}
 
-	if f.fn > readFrameTip+rq.size {
+	if f.fn > readFrameTip+rq.size && readFrameTip != 0 {
 		log.Debugf("Near corruption incident?? %v vs the max peek of %v (frametip %d)", f.fn, readFrameTip+rq.size-1, readFrameTip)
 		return // Nope! this will corrupt the buffer
 	}

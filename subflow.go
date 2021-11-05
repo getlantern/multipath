@@ -1,12 +1,12 @@
 package multipath
 
 import (
-	"container/list"
 	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/ema"
@@ -14,32 +14,37 @@ import (
 )
 
 type pendingAck struct {
-	fn     uint64
-	sz     uint64
-	sentAt time.Time
+	fn         uint64
+	sz         uint64
+	sentAt     time.Time
+	outboundSf *subflow
+	framePtr   *sendFrame
 }
+
 type subflow struct {
 	to   string
 	conn net.Conn
 	mpc  *mpConn
 
-	chClose       chan struct{}
-	closeOnce     sync.Once
-	sendQueue     chan *sendFrame
-	pendingAcks   *list.List
-	muPendingAcks sync.RWMutex
-	emaRTT        *ema.EMA
-	tracker       StatsTracker
+	chClose             chan struct{}
+	closeOnce           sync.Once
+	sendQueue           chan *sendFrame
+	pendingPing         *pendingAck // Only for pings
+	muPendingPing       sync.RWMutex
+	emaRTT              *ema.EMA
+	tracker             StatsTracker
+	actuallyBusyOnWrite uint64
 }
 
 func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker StatsTracker) *subflow {
 	sf := &subflow{
-		to:          to,
-		conn:        c,
-		mpc:         mpc,
-		chClose:     make(chan struct{}),
-		sendQueue:   make(chan *sendFrame),
-		pendingAcks: list.New(),
+		to:        to,
+		conn:      c,
+		mpc:       mpc,
+		chClose:   make(chan struct{}),
+		sendQueue: make(chan *sendFrame, 1),
+		// pendingPing is used for storing the subflow's ping data. Handy since pings are subflow dependent
+		pendingPing: nil,
 		emaRTT:      ema.NewDuration(longRTT, rttAlpha),
 		tracker:     tracker,
 	}
@@ -53,7 +58,9 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 		sf.ack(frameTypePong)
 	} else {
 		// server side subflow expects a pong frame to calculate RTT.
-		sf.pendingAcks.PushBack(pendingAck{frameTypePong, 0, probeStart})
+		sf.muPendingPing.Lock()
+		sf.pendingPing = &pendingAck{frameTypePong, 0, probeStart, sf, nil}
+		sf.muPendingPing.Unlock()
 	}
 	go func() {
 		if err := sf.readLoop(); err != nil && err != io.EOF {
@@ -64,58 +71,20 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 }
 
 func (sf *subflow) readLoop() (err error) {
-	ch := make(chan *frame)
+	ch := make(chan *rxFrame)
 	r := byteReader{Reader: sf.conn}
-	go func() {
-		defer close(ch)
-		for {
-			var sz, fn uint64
-			sz, err = ReadVarInt(r)
-			if err != nil {
-				sf.close()
-				return
-			}
-			fn, err = ReadVarInt(r)
-			if err != nil {
-				sf.close()
-				return
-			}
-			if sz == 0 {
-				sf.gotACK(fn)
-				continue
-			}
-			log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
-			if sz > 1<<20 {
-				log.Errorf("Frame of size %v from %s is impossible", sz, sf.to)
-				sf.close()
-				return
-			}
-			buf := pool.Get(int(sz))
-			_, err = io.ReadFull(r, buf)
-			if err != nil {
-				pool.Put(buf)
-				sf.close()
-				return
-			}
-			sf.ack(fn)
-			ch <- &frame{fn: fn, bytes: buf}
-			sf.tracker.OnRecv(sz)
-			select {
-			case <-sf.chClose:
-				return
-			default:
-				// continue
-			}
-		}
-	}()
+	go sf.readLoopFrames(ch, err, r)
+
 	probeTimer := time.NewTimer(randomize(probeInterval))
+	go sf.probe() // Force a ping out right away, to calibrate our own timings
+
 	for {
 		select {
-		case frame := <-ch:
+		case frame := <-ch: // Fed by readLoopFrames
 			if frame == nil {
 				return
 			}
-			sf.mpc.recvQueue.add(frame)
+			sf.mpc.recvQueue.add(frame, sf)
 			if !probeTimer.Stop() {
 				<-probeTimer.C
 			}
@@ -127,24 +96,118 @@ func (sf *subflow) readLoop() (err error) {
 	}
 }
 
+func (sf *subflow) readLoopFrames(ch chan *rxFrame, err error, r byteReader) bool {
+	defer close(ch)
+	for {
+		// The is the core "reactor" where frames are read. The frame format
+		// can be found in the top of multipath.go
+		var sz, fn uint64
+		sz, err = ReadVarInt(r)
+		if err != nil {
+			sf.close()
+			return true
+		}
+		fn, err = ReadVarInt(r)
+		if err != nil {
+			sf.close()
+			return true
+		}
+		if sz == 0 {
+			sf.gotACK(fn)
+			continue
+		}
+		log.Tracef("got frame %d from %s with %d bytes", fn, sf.to, sz)
+		if sz > 1<<20 {
+			// This almost always happens due to frame corruption.
+			log.Errorf("Frame of size %v from %s is impossible", sz, sf.to)
+			sf.close()
+			return true
+		}
+		buf := pool.Get(int(sz))
+		_, err = io.ReadFull(r, buf)
+		if err != nil {
+			pool.Put(buf)
+			sf.close()
+			return true
+		}
+
+		if fn > (sf.mpc.recvQueue.readFrameTip + sf.mpc.recvQueue.size) {
+			// This frame dropped is too far in the future to apply
+			continue
+		}
+
+		ch <- &rxFrame{fn: fn, bytes: buf}
+		sf.tracker.OnRecv(sz)
+		select {
+		case <-sf.chClose:
+			return true
+		default:
+		}
+	}
+}
+
 func (sf *subflow) sendLoop() {
 	for {
 		select {
 		case <-sf.chClose:
 			return
 		case frame := <-sf.sendQueue:
+			if frame.retransmissions != 0 {
+				log.Tracef("Retransmit on %d, for the %dth time", frame.fn, frame.retransmissions)
+			}
+			if *frame.released == 1 {
+				log.Errorf("Tried to send a frame that has already been released! Frame Number: %v", frame.fn)
+				sf.mpc.writerMaybeReady <- true
+				continue
+			}
+			if frame.sentVia == nil {
+				frame.sentVia = make([]transmissionDatapoint, 0)
+			}
+			frame.sentVia = append(frame.sentVia, transmissionDatapoint{sf, time.Now()})
 			sf.addPendingAck(frame)
+
+			atomic.StoreUint64(&sf.actuallyBusyOnWrite, 1)
 			n, err := sf.conn.Write(frame.buf)
+			atomic.StoreUint64(&sf.actuallyBusyOnWrite, 0)
+			var abort bool
+			for {
+				// wake all writers up, since they might have something to send now that we likely
+				// have free capacity.
+				select {
+				case sf.mpc.writerMaybeReady <- true:
+				default:
+					abort = true
+				}
+				if abort {
+					break
+				}
+			}
+
+			// only wake up one re-transmitter, to better control the possible hored of them
+			select {
+			case sf.mpc.tryRetransmit <- true:
+			default:
+			}
+
 			if err != nil {
 				log.Debugf("failed to write frame %d to %s: %v", frame.fn, sf.to, err)
-				// TODO: For temporary errors, maybe send the subflow to the
-				// back of the line instead of closing it.
-				sf.close()
+
 				if frame.isDataFrame() {
 					go sf.mpc.retransmit(frame)
 				}
+
+				if n != 0 && len(frame.buf) != n {
+					log.Tracef("We may have corrupted the output %#v vs %#v", n, len(frame.buf))
+					// In this case, we will not try and write the remaining, and instead we will assume
+					// that writing to the socket again will only make this worse, so aborting the subflow
+					sf.close()
+					return
+				}
+
+				sf.close()
 				return
 			}
+
 			if n != len(frame.buf) {
 				panic(fmt.Sprintf("expect to write %d bytes on %s, written %d", len(frame.buf), sf.to, n))
 			}
@@ -158,23 +221,17 @@ func (sf *subflow) sendLoop() {
 			} else {
 				sf.tracker.OnRetransmit(frame.sz)
 			}
-			d := sf.retransTimer()
-			time.AfterFunc(d, func() {
-				if sf.isPendingAck(frame.fn) {
-					// No ack means the subflow fails or has a longer RTT
-					sf.updateRTT(d)
-					sf.mpc.retransmit(frame)
-				} else {
-					// It is ok to release buffer here as the frame will never
-					// be retransmitted again.
-					frame.release()
-				}
-			})
 		}
 	}
 }
 
 func (sf *subflow) ack(fn uint64) {
+	if sf == nil {
+		// This should only ever happen in testing.
+		log.Debugf("Nil subflow requested to do an ack! (should only happen on tests)")
+		return
+	}
+
 	select {
 	case <-sf.chClose:
 	case sf.sendQueue <- composeFrame(fn, nil):
@@ -188,26 +245,23 @@ func (sf *subflow) gotACK(fn uint64) {
 		sf.ack(frameTypePong)
 		return
 	}
-	sf.muPendingAcks.Lock()
-	defer sf.muPendingAcks.Unlock()
-	e := sf.pendingAcks.Front()
-	if e == nil {
-		log.Errorf("unsolicited ack for frame %d from %s", fn, sf.to)
-		sf.close()
+
+	sf.mpc.pendingAckMu.RLock()
+	pending := sf.mpc.pendingAckMap[fn]
+	if sf.mpc.pendingAckMap[fn] != nil {
+		sf.mpc.pendingAckMu.RUnlock()
+		sf.mpc.pendingAckMu.Lock()
+		delete(sf.mpc.pendingAckMap, fn)
+		sf.mpc.pendingAckMu.Unlock()
+	} else {
+		sf.mpc.pendingAckMu.RUnlock()
 		return
 	}
-	pending := e.Value.(pendingAck)
-	if pending.fn != fn {
-		log.Errorf("unsolicited ack for frame %d from %s, expect %d", fn, sf.to, pending.fn)
-		sf.close()
-		return
-	}
-	sf.pendingAcks.Remove(e)
-	if pending.sz < maxFrameSizeToCalculateRTT {
-		// it's okay to calculate RTT this way because ack frame is always sent
-		// back through the same subflow, and a data frame is never sent over
-		// the same subflow more than once.
-		sf.updateRTT(time.Since(pending.sentAt))
+
+	if time.Since(pending.sentAt) < time.Second {
+		pending.outboundSf.updateRTT(time.Since(pending.sentAt))
+	} else {
+		pending.outboundSf.updateRTT(time.Second)
 	}
 }
 
@@ -223,12 +277,14 @@ func (sf *subflow) getRTT() time.Duration {
 	// time since the earliest yet-to-be-acknowledged frame being sent is more
 	// up-to-date.
 	var realtime time.Duration
-	sf.muPendingAcks.RLock()
-	if e := sf.pendingAcks.Front(); e != nil {
-		pending := e.Value.(pendingAck)
-		realtime = time.Since(pending.sentAt)
+	sf.muPendingPing.RLock()
+	if sf.pendingPing != nil {
+		realtime = time.Since(sf.pendingPing.sentAt)
+	} else {
+		sf.muPendingPing.RUnlock()
+		return recorded
 	}
-	sf.muPendingAcks.RUnlock()
+	sf.muPendingPing.RUnlock()
 	if realtime > recorded {
 		return realtime
 	} else {
@@ -237,29 +293,28 @@ func (sf *subflow) getRTT() time.Duration {
 }
 
 func (sf *subflow) addPendingAck(frame *sendFrame) {
-	sf.muPendingAcks.Lock()
 	switch frame.fn {
 	case frameTypePing:
 		// we expect pong for ping
-		sf.pendingAcks.PushBack(pendingAck{frameTypePong, 0, time.Now()})
+		sf.muPendingPing.Lock()
+		sf.pendingPing = &pendingAck{frameTypePong, 0, time.Now(), sf, nil}
+		sf.muPendingPing.Unlock()
 	case frameTypePong:
 		// expect no response for pong
 	default:
 		if frame.isDataFrame() {
-			sf.pendingAcks.PushBack(pendingAck{frame.fn, frame.sz, time.Now()})
+			sf.mpc.pendingAckMu.Lock()
+			sf.mpc.pendingAckMap[frame.fn] = &pendingAck{frame.fn, frame.sz, time.Now(), sf, frame}
+			sf.mpc.pendingAckMu.Unlock()
 		}
 	}
-	sf.muPendingAcks.Unlock()
-
 }
 
 func (sf *subflow) isPendingAck(fn uint64) bool {
-	sf.muPendingAcks.RLock()
-	defer sf.muPendingAcks.RUnlock()
-	for e := sf.pendingAcks.Front(); e != nil; e = e.Next() {
-		if e.Value.(pendingAck).fn == fn {
-			return true
-		}
+	if fn > minFrameNumber {
+		sf.mpc.pendingAckMu.RLock()
+		defer sf.mpc.pendingAckMu.RUnlock()
+		return sf.mpc.pendingAckMap[fn] != nil
 	}
 	return false
 }

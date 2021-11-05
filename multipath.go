@@ -82,17 +82,25 @@ var (
 )
 
 type connectionID uuid.UUID
-type frame struct {
+
+type rxFrame struct {
 	fn    uint64
 	bytes []byte
 }
 
+type transmissionDatapoint struct {
+	sf     *subflow
+	txTime time.Time
+}
+
 type sendFrame struct {
-	fn              uint64
-	sz              uint64
-	buf             []byte
-	released        *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
-	retransmissions int
+	fn                 uint64
+	sz                 uint64
+	buf                []byte
+	released           *int32 // 1 == true; 0 == false. Use pointer so copied object still references the same address, as buf does
+	retransmissions    int
+	sentVia            []transmissionDatapoint // Contains the subflows it's already been written to, and when
+	beingRetransmitted uint64
 }
 
 func composeFrame(fn uint64, b []byte) *sendFrame {
@@ -115,8 +123,6 @@ func (f *sendFrame) isDataFrame() bool {
 func (f *sendFrame) release() {
 	if atomic.CompareAndSwapInt32(f.released, 0, 1) {
 		pool.Put(f.buf)
-	} else {
-		log.Error("Release already released buffer!")
 	}
 }
 

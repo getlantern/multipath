@@ -34,15 +34,17 @@ type subflow struct {
 	emaRTT              *ema.EMA
 	tracker             StatsTracker
 	actuallyBusyOnWrite uint64
+	finishedClosing     chan bool
 }
 
 func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStart time.Time, tracker StatsTracker) *subflow {
 	sf := &subflow{
-		to:        to,
-		conn:      c,
-		mpc:       mpc,
-		chClose:   make(chan struct{}),
-		sendQueue: make(chan *sendFrame, 1),
+		to:              to,
+		conn:            c,
+		mpc:             mpc,
+		chClose:         make(chan struct{}),
+		sendQueue:       make(chan *sendFrame, 1),
+		finishedClosing: make(chan bool, 1),
 		// pendingPing is used for storing the subflow's ping data. Handy since pings are subflow dependent
 		pendingPing: nil,
 		emaRTT:      ema.NewDuration(longRTT, rttAlpha),
@@ -73,7 +75,7 @@ func startSubflow(to string, c net.Conn, mpc *mpConn, clientSide bool, probeStar
 func (sf *subflow) readLoop() (err error) {
 	ch := make(chan *rxFrame)
 	r := byteReader{Reader: sf.conn}
-	go sf.readLoopFrames(ch, err, r)
+	go sf.readLoopFrames(ch, r)
 
 	probeTimer := time.NewTimer(randomize(probeInterval))
 	go sf.probe() // Force a ping out right away, to calibrate our own timings
@@ -96,8 +98,9 @@ func (sf *subflow) readLoop() (err error) {
 	}
 }
 
-func (sf *subflow) readLoopFrames(ch chan *rxFrame, err error, r byteReader) bool {
+func (sf *subflow) readLoopFrames(ch chan *rxFrame, r byteReader) bool {
 	defer close(ch)
+	var err error
 	for {
 		// The is the core "reactor" where frames are read. The frame format
 		// can be found in the top of multipath.go
@@ -131,7 +134,7 @@ func (sf *subflow) readLoopFrames(ch chan *rxFrame, err error, r byteReader) boo
 			return true
 		}
 
-		if fn > (sf.mpc.recvQueue.readFrameTip + sf.mpc.recvQueue.size) {
+		if fn > (atomic.LoadUint64(&sf.mpc.recvQueue.readFrameTip) + sf.mpc.recvQueue.size) {
 			// This frame dropped is too far in the future to apply
 			continue
 		}
@@ -147,24 +150,56 @@ func (sf *subflow) readLoopFrames(ch chan *rxFrame, err error, r byteReader) boo
 }
 
 func (sf *subflow) sendLoop() {
+	closing := false
+	closeCountdown := time.NewTimer(time.Millisecond * 33)
+	closeCountdown.Stop()
+	defer func() {
+		sf.finishedClosing <- true
+	}()
+
+	go func() {
+		<-sf.chClose
+		closeCountdown.Reset(time.Millisecond * 33)
+		closing = true
+	}()
+
 	for {
 		select {
-		case <-sf.chClose:
+		case <-closeCountdown.C:
+			sf.conn.Close()
 			return
 		case frame := <-sf.sendQueue:
+			if closing {
+				closeCountdown.Reset(time.Millisecond * 33)
+			}
+			if closing {
+				closing = true
+			}
+
+			frame.changeLock.Lock()
 			if frame.retransmissions != 0 {
 				log.Tracef("Retransmit on %d, for the %dth time", frame.fn, frame.retransmissions)
 			}
 			if *frame.released == 1 {
 				log.Errorf("Tried to send a frame that has already been released! Frame Number: %v", frame.fn)
-				sf.mpc.writerMaybeReady <- true
+
+				select {
+				case sf.mpc.writerMaybeReady <- true:
+				default:
+				}
+
+				frame.changeLock.Unlock()
 				continue
 			}
-			if frame.sentVia == nil {
-				frame.sentVia = make([]transmissionDatapoint, 0)
+			if frame.retransmissions == 0 {
+				if frame.sentVia == nil {
+					frame.sentVia = make([]transmissionDatapoint, 0)
+				}
+				frame.sentVia = append(frame.sentVia, transmissionDatapoint{sf, time.Now()})
 			}
-			frame.sentVia = append(frame.sentVia, transmissionDatapoint{sf, time.Now()})
+
 			sf.addPendingAck(frame)
+			frame.changeLock.Unlock()
 
 			atomic.StoreUint64(&sf.actuallyBusyOnWrite, 1)
 			n, err := sf.conn.Write(frame.buf)
@@ -216,11 +251,13 @@ func (sf *subflow) sendLoop() {
 				continue
 			}
 			log.Tracef("done writing frame %d with %d bytes via %s", frame.fn, frame.sz, sf.to)
+			frame.changeLock.Lock()
 			if frame.retransmissions == 0 {
 				sf.tracker.OnSent(frame.sz)
 			} else {
 				sf.tracker.OnRetransmit(frame.sz)
 			}
+			frame.changeLock.Unlock()
 		}
 	}
 }
@@ -326,8 +363,11 @@ func (sf *subflow) probe() {
 
 func (sf *subflow) retransTimer() time.Duration {
 	d := sf.emaRTT.GetDuration() * 2
-	if d < 100*time.Millisecond {
-		d = 100 * time.Millisecond
+	if d > 512*time.Millisecond {
+		d = 512 * time.Millisecond
+	}
+	if d < 1*time.Millisecond {
+		d = time.Millisecond
 	}
 	return d
 }
@@ -336,8 +376,15 @@ func (sf *subflow) close() {
 	sf.closeOnce.Do(func() {
 		log.Tracef("closing subflow to %s", sf.to)
 		sf.mpc.remove(sf)
-		sf.conn.Close()
 		close(sf.chClose)
+		drainTime := time.Now()
+		maxDrainTime := time.NewTimer(time.Second)
+		select {
+		case <-maxDrainTime.C:
+		case <-sf.finishedClosing:
+		}
+		maxDrainTime.Stop()
+		log.Debugf("Took %v to close subflow", time.Since(drainTime))
 	})
 }
 

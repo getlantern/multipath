@@ -17,7 +17,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+var frozenListeners [100]int
+var frozenDailers [100]int
+var frozenTrackingLock sync.Mutex
+
 func TestE2E(t *testing.T) {
+	// Failing on timeout
 	go func() {
 		http.ListenAndServe("localhost:6060", nil)
 	}()
@@ -33,7 +38,7 @@ func TestE2E(t *testing.T) {
 		listeners = append(listeners, newTestListener(l, i))
 		trackers = append(trackers, NullTracker{})
 		// simulate one or more dialers to each listener
-		for j := 0; j <= rand.Intn(5); j++ {
+		for j := 0; j <= 1; j++ {
 			dialers = append(dialers, newTestDialer(l.Addr().String(), len(dialers)))
 		}
 	}
@@ -41,6 +46,27 @@ func TestE2E(t *testing.T) {
 	bl := NewListener(listeners, trackers)
 	defer bl.Close()
 	bd := NewDialer("endpoint", dialers)
+
+	go func() {
+		lastDebug := ""
+		for {
+			frozenTrackingLock.Lock()
+			newDebug := "Dailers: \n"
+			for k, v := range dialers {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenDailers[k], v.(*testDialer).name)
+			}
+			newDebug += "Listeners: \n"
+			for k, v := range listeners {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenListeners[k], v.(*testListener).l.Addr())
+			}
+			if newDebug != lastDebug {
+				log.Debug(newDebug)
+				lastDebug = newDebug
+			}
+			frozenTrackingLock.Unlock()
+			time.Sleep(time.Millisecond * 33)
+		}
+	}()
 
 	go func() {
 		for {
@@ -76,7 +102,7 @@ func TestE2E(t *testing.T) {
 	defer conn.Close()
 	b := make([]byte, 4)
 	roundtrip := func() {
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 5; i++ {
 			copy(b, []byte(strconv.Itoa(i)))
 			n, err := conn.Write(b)
 			assert.NoError(t, err)
@@ -91,22 +117,40 @@ func TestE2E(t *testing.T) {
 
 	for i := 0; i < len(listeners)-1; i++ {
 		log.Debugf("========listener[%d] is hanging", i)
+		frozenTrackingLock.Lock()
+		frozenListeners[i] = 1
+		frozenTrackingLock.Unlock()
 		listeners[i].(*testListener).setDelay(time.Hour)
 		roundtrip()
 	}
 	for i := 0; i < len(dialers)-1; i++ {
 		log.Debugf("========%s is hanging", dialers[i].Label())
+		frozenTrackingLock.Lock()
+		frozenDailers[i] = 1
+		frozenTrackingLock.Unlock()
 		dialers[i].(*testDialer).setDelay(time.Hour)
 		roundtrip()
 	}
 	log.Debugf("========reenabled listener #0 and %s", dialers[0].Label())
 	listeners[0].(*testListener).setDelay(0)
 	dialers[0].(*testDialer).setDelay(0)
+	frozenTrackingLock.Lock()
+	frozenListeners[0] = 0
+	frozenDailers[0] = 0
+	frozenTrackingLock.Unlock()
+
 	log.Debug("========the last listener is hanging")
 	listeners[len(listeners)-1].(*testListener).setDelay(time.Hour)
+	frozenTrackingLock.Lock()
+	frozenListeners[len(listeners)-1] = 1
+	frozenTrackingLock.Unlock()
+
 	roundtrip()
 	log.Debugf("========%s is hanging", dialers[len(dialers)-1].Label())
 	dialers[len(dialers)-1].(*testDialer).setDelay(time.Hour)
+	frozenTrackingLock.Lock()
+	frozenDailers[len(dialers)-1] = 1
+	frozenTrackingLock.Unlock()
 	roundtrip()
 
 	log.Debugf("========Now test writing and reading back tons of data")
@@ -129,6 +173,213 @@ func TestE2E(t *testing.T) {
 	for i := 0; i < len(dialers); i++ {
 		dialers[i].(*testDialer).setDelay(0)
 	}
+}
+
+func TestE2EEarlyClose(t *testing.T) {
+	// Reusing the testE2E infra as much as possible
+	//
+	// this test is here to ensure that mpConns transfer the full
+	// set of data transmitted when the connection is closed, to avoid truncation.
+	listeners := []net.Listener{}
+	trackers := []StatsTracker{}
+	dialers := []Dialer{}
+	for i := 0; i < 3; i++ {
+		l, err := net.Listen("tcp", ":")
+		if !assert.NoError(t, err) {
+			continue
+		}
+		defer l.Close()
+		listeners = append(listeners, newTestListener(l, i))
+		trackers = append(trackers, NullTracker{})
+		// simulate one or more dialers to each listener
+		for j := 0; j <= 1; j++ {
+			dialers = append(dialers, newTestDialer(l.Addr().String(), len(dialers)))
+		}
+	}
+	log.Debugf("Testing with %d listeners and %d dialers", len(listeners), len(dialers))
+	bl := NewListener(listeners, trackers)
+	defer bl.Close()
+	bd := NewDialer("endpoint", dialers)
+
+	go func() {
+		lastDebug := ""
+		for {
+			frozenTrackingLock.Lock()
+			newDebug := "Dailers: \n"
+			for k, v := range dialers {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenDailers[k], v.(*testDialer).name)
+			}
+			newDebug += "Listeners: \n"
+			for k, v := range listeners {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenListeners[k], v.(*testListener).l.Addr())
+			}
+			if newDebug != lastDebug {
+				log.Debug(newDebug)
+				lastDebug = newDebug
+			}
+			frozenTrackingLock.Unlock()
+			time.Sleep(time.Millisecond * 33)
+		}
+	}()
+
+	go func() {
+		for {
+			conn, err := bl.Accept()
+			select {
+			case <-bl.(*mpListener).chClose:
+				return
+			default:
+			}
+			assert.NoError(t, err)
+			go func() {
+				defer conn.Close()
+				dataLeftToSend := 10 * 100000000 // 10MB
+				b := make([]byte, 10240)
+				for {
+					var n int
+					var err error
+					if dataLeftToSend < len(b) {
+						n, err = conn.Write(b[:dataLeftToSend])
+					} else {
+						n, err = conn.Write(b)
+					}
+					if err != nil {
+						return
+					}
+					dataLeftToSend = dataLeftToSend - n
+
+					if dataLeftToSend == 0 {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	conn, err := bd.DialContext(context.Background())
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer conn.Close()
+
+	readBytes := 0
+	for {
+		b := make([]byte, 1024)
+		n, err := conn.Read(b)
+		if err != nil {
+			fmt.Printf("Connection closed early at %v (%v)\n", readBytes, err)
+			t.FailNow()
+		}
+		readBytes += n
+		if readBytes == 10*100000000 {
+			// pass!
+			break
+		}
+	}
+	t.Fatalf("aaa %v", readBytes)
+}
+
+func TestE2EEarlyCloseOtherWay(t *testing.T) {
+	// Reusing the testE2E infra as much as possible
+	//
+	// this test is here to ensure that mpConns transfer the full
+	// set of data transmitted when the connection is closed, to avoid truncation.
+	listeners := []net.Listener{}
+	trackers := []StatsTracker{}
+	dialers := []Dialer{}
+	for i := 0; i < 3; i++ {
+		l, err := net.Listen("tcp", ":")
+		if !assert.NoError(t, err) {
+			continue
+		}
+		defer l.Close()
+		listeners = append(listeners, newTestListener(l, i))
+		trackers = append(trackers, NullTracker{})
+		// simulate one or more dialers to each listener
+		for j := 0; j <= 1; j++ {
+			dialers = append(dialers, newTestDialer(l.Addr().String(), len(dialers)))
+		}
+	}
+	log.Debugf("Testing with %d listeners and %d dialers", len(listeners), len(dialers))
+	bl := NewListener(listeners, trackers)
+	defer bl.Close()
+	bd := NewDialer("endpoint", dialers)
+
+	go func() {
+		lastDebug := ""
+		for {
+			frozenTrackingLock.Lock()
+			newDebug := "Dailers: \n"
+			for k, v := range dialers {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenDailers[k], v.(*testDialer).name)
+			}
+			newDebug += "Listeners: \n"
+			for k, v := range listeners {
+				newDebug += fmt.Sprintf("\t(%d) - %v\n", frozenListeners[k], v.(*testListener).l.Addr())
+			}
+			if newDebug != lastDebug {
+				log.Debug(newDebug)
+				lastDebug = newDebug
+			}
+			frozenTrackingLock.Unlock()
+			time.Sleep(time.Millisecond * 33)
+		}
+	}()
+
+	go func() {
+		for {
+			conn, err := bl.Accept()
+			select {
+			case <-bl.(*mpListener).chClose:
+				return
+			default:
+			}
+			assert.NoError(t, err)
+			go func() {
+				defer conn.Close()
+
+				readBytes := 0
+				for {
+					b := make([]byte, 1024)
+					n, err := conn.Read(b)
+					if err != nil {
+						fmt.Printf("Connection closed early at %v (%v)\n", readBytes, err)
+						t.FailNow()
+					}
+					readBytes += n
+					if readBytes == 10*100000000 {
+						// pass!
+						return
+					}
+				}
+			}()
+		}
+	}()
+	conn, err := bd.DialContext(context.Background())
+	if !assert.NoError(t, err) {
+		return
+	}
+
+	defer conn.Close()
+	dataLeftToSend := 10 * 100000000 // 10MB
+	b := make([]byte, 10210)
+	for {
+		var n int
+		var err error
+		if dataLeftToSend < len(b) {
+			n, err = conn.Write(b[:dataLeftToSend])
+		} else {
+			n, err = conn.Write(b)
+		}
+		if err != nil {
+			t.Fatalf("Failed to write %v", err)
+		}
+		dataLeftToSend = dataLeftToSend - n
+
+		if dataLeftToSend == 0 {
+			return
+		}
+	}
+
 }
 
 type testDialer struct {

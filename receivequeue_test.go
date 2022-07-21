@@ -59,3 +59,32 @@ func TestRead(t *testing.T) {
 	shouldWaitBeforeRead(delay, "abc")
 	shouldWaitBeforeRead(0, "d12")
 }
+
+func TestReadRXQEarlyClose(t *testing.T) {
+	q := newReceiveQueue(10)
+	fn := uint64(minFrameNumber - 1)
+	addFrame := func(s string) {
+		fn++
+		q.add(&rxFrame{fn: fn, bytes: []byte(s)}, nil)
+	}
+	shouldRead := func(s string) {
+		b := make([]byte, 5)
+		n, err := q.read(b)
+		assert.NoError(t, err)
+		assert.Equal(t, s, string(b[:n]))
+	}
+
+	addFrame("Hello")
+	shouldRead("Hello")
+	addFrame("World")
+	addFrame("Burld")
+	q.close()
+	time.Sleep(time.Millisecond * 101)
+	shouldRead("World")
+	shouldRead("Burld")
+	b := make([]byte, 10)
+	_, err := q.read(b)
+	if err != ErrClosed {
+		t.FailNow()
+	}
+}

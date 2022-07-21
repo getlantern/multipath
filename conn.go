@@ -120,6 +120,9 @@ func (bc *mpConn) SetWriteDeadline(t time.Time) error {
 }
 
 func (bc *mpConn) retransmit(frame *sendFrame) {
+	frame.changeLock.Lock()
+	defer frame.changeLock.Unlock()
+
 	if atomic.LoadUint64(&frame.beingRetransmitted) == 1 {
 		return
 	}
@@ -137,44 +140,32 @@ func (bc *mpConn) retransmit(frame *sendFrame) {
 			return
 		}
 
-		for _, sf := range subflows {
-			if atomic.LoadUint64(&sf.actuallyBusyOnWrite) == 1 {
-				// Avoid a possibly blocked writer for a retransmit
-				continue
-			}
+		var selectedSubflow *subflow
 
-			// let's avoid re-sending a frame down the same socket twice.
-			// Since at best, it just double sends a frame into the send buffer
-			// and at worst it blocks other frames from entering a send buffer.
-			skipSF := false
-			for _, avoidSF := range frame.sentVia {
-				if sf == avoidSF.sf {
-					if time.Since(avoidSF.txTime) < time.Second {
-						skipSF = true
-					}
-				}
-			}
-			if skipSF {
-				// Fully abort this retransmit
+		abort, alreadyTransmittedOnAllSubflows, selectedSubflow = selectSubflowForRetransmit(subflows, frame, false)
+		if selectedSubflow == nil {
+			abort, alreadyTransmittedOnAllSubflows, selectedSubflow = selectSubflowForRetransmit(subflows, frame, true)
+			if selectedSubflow == nil {
 				abort = true
 				alreadyTransmittedOnAllSubflows = true
-				continue
-			}
-
-			select {
-			case <-sf.chClose:
-				continue
-			case sf.sendQueue <- frame:
-				frame.retransmissions++
-				log.Debugf("retransmitted frame %d via %s", frame.fn, sf.to)
-				if frame.sentVia == nil {
-					frame.sentVia = make([]transmissionDatapoint, 0)
-				}
-				frame.sentVia = append(frame.sentVia, transmissionDatapoint{sf, time.Now()})
-				return
-			default:
+				break
 			}
 		}
+
+		select {
+		case <-selectedSubflow.chClose:
+			continue
+		case selectedSubflow.sendQueue <- frame:
+			frame.retransmissions++
+			log.Debugf("retransmitted frame %d via %s", frame.fn, selectedSubflow.to)
+			if frame.sentVia == nil {
+				frame.sentVia = make([]transmissionDatapoint, 0)
+			}
+			frame.sentVia = append(frame.sentVia, transmissionDatapoint{selectedSubflow, time.Now()})
+			return
+		default:
+		}
+
 		if abort {
 			break
 		}
@@ -186,6 +177,46 @@ func (bc *mpConn) retransmit(frame *sendFrame) {
 	}
 
 	return
+}
+
+func selectSubflowForRetransmit(subflows []*subflow, frame *sendFrame, timeFallback bool) (bool, bool, *subflow) {
+	var selectedSubflow *subflow
+	for _, sf := range subflows {
+		if atomic.LoadUint64(&sf.actuallyBusyOnWrite) == 1 {
+			// Avoid a possibly blocked writer for a retransmit
+			// let's avoid re-sending a frame down the same socket twice.
+			// Since at best, it just double sends a frame into the send buffer
+			// and at worst it blocks other frames from entering a send buffer.
+			continue
+		}
+		// Have we used this subflow before for this frame?
+		usedBefore := false
+		var avoidTime time.Time
+		for _, avoidSF := range frame.sentVia {
+			if sf == avoidSF.sf {
+				usedBefore = true
+				avoidTime = avoidSF.txTime
+			}
+		}
+
+		// It may be acceptable to use a subflow that has been used before
+		// if we are in timeFallback mode
+		if usedBefore {
+			if timeFallback {
+				if time.Since(avoidTime) > time.Second {
+					usedBefore = false
+				}
+			} else {
+				continue
+			}
+		}
+
+		if !usedBefore {
+			// frame.sentVia
+			return false, false, sf
+		}
+	}
+	return true, true, selectedSubflow
 }
 
 func (bc *mpConn) sortedSubflows() []*subflow {
@@ -227,7 +258,7 @@ func (bc *mpConn) retransmitLoop() {
 		select {
 		case <-evalTick.C:
 		}
-		if bc.closed == 1 {
+		if atomic.LoadUint32(&bc.closed) == 1 {
 			return
 		}
 
@@ -248,16 +279,19 @@ func (bc *mpConn) retransmitLoop() {
 
 		for _, frame := range RetransmitFrames {
 			sendframe := frame.framePtr
+			sendframe.changeLock.Lock()
 			if bc.isPendingAck(frame.fn) {
 				// No ack means the subflow fails or has a longer RTT
 				// log.Errorf("Retransmitting! %#v", frame.fn)
 				if sendframe.beingRetransmitted == 0 {
 					go bc.retransmit(sendframe)
 				}
+				sendframe.changeLock.Unlock()
 			} else {
 				// It is ok to release buffer here as the frame will never
 				// be retransmitted again.
 				sendframe.release()
+				sendframe.changeLock.Unlock()
 				bc.pendingAckMu.Lock()
 				delete(bc.pendingAckMap, frame.fn)
 				bc.pendingAckMu.Unlock()

@@ -5,4 +5,4 @@ Multipath aggregates ordered and reliable connections over multiple paths togeth
 
 See docs in [multipath.go](multipath.go) for details.
 
-This code is used in https://github.com/benjojo/bondcat, and hat's off to Ben for implementing [recent fixes](https://github.com/benjojo/bondcat/tree/main/multipath).
+This code is used in https://github.com/benjojo/bondcat, and hat's off to @benjojo for implementing [recent fixes](https://github.com/benjojo/bondcat/tree/main/multipath).

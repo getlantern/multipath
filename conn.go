@@ -10,6 +10,7 @@ import (
 
 type mpConn struct {
 	cid              connectionID
+	remoteAddr       net.Addr
 	lastFN           uint64
 	subflows         []*subflow
 	muSubflows       sync.RWMutex
@@ -22,8 +23,10 @@ type mpConn struct {
 	pendingAckMu  *sync.RWMutex
 }
 
-func newMPConn(cid connectionID) *mpConn {
-	mpc := &mpConn{cid: cid,
+func newMPConn(cid connectionID, remoteAddr net.Addr) *mpConn {
+	mpc := &mpConn{
+		cid:              cid,
+		remoteAddr:       remoteAddr,
 		lastFN:           minFrameNumber - 1,
 		recvQueue:        newReceiveQueue(recieveQueueLength),
 		writerMaybeReady: make(chan bool, 1),
@@ -34,6 +37,7 @@ func newMPConn(cid connectionID) *mpConn {
 	go mpc.retransmitLoop()
 	return mpc
 }
+
 func (bc *mpConn) Read(b []byte) (n int, err error) {
 	return bc.recvQueue.read(b)
 }
@@ -95,7 +99,7 @@ func (bc *mpConn) LocalAddr() net.Addr {
 }
 
 func (bc *mpConn) RemoteAddr() net.Addr {
-	return fakeAddr{}
+	return bc.remoteAddr
 }
 
 func (bc *mpConn) SetDeadline(t time.Time) error {

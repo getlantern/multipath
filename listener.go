@@ -105,7 +105,7 @@ func (mpl *mpListener) acceptFrom(l net.Listener, st StatsTracker) error {
 	bc, exists := mpl.mpConns[cid]
 	if !exists {
 		if newConn {
-			bc = newMPConn(cid)
+			bc = newMPConn(cid, conn.RemoteAddr())
 			mpl.mpConns[cid] = bc
 		} else {
 			mpl.muMPConns.Unlock()

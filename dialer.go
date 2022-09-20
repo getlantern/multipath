@@ -104,7 +104,7 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			return zeroCID, false
 		}
 		if cid == zeroCID {
-			bc = newMPConn(newCID)
+			bc = newMPConn(newCID, conn.RemoteAddr())
 			go func() {
 				for {
 					time.Sleep(time.Second)

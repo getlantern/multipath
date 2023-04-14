@@ -108,18 +108,23 @@ func (mpd *mpDialer) DialContext(ctx context.Context) (net.Conn, error) {
 			go func() {
 				for {
 					time.Sleep(time.Second)
-					bc.pendingAckMu.RLock()
-					oldest := time.Duration(0)
-					oldestFN := uint64(0)
-					for fn, frame := range bc.pendingAckMap {
-						if time.Since(frame.sentAt) > oldest {
-							oldest = time.Since(frame.sentAt)
-							oldestFN = fn
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						bc.pendingAckMu.RLock()
+						oldest := time.Duration(0)
+						oldestFN := uint64(0)
+						for fn, frame := range bc.pendingAckMap {
+							if time.Since(frame.sentAt) > oldest {
+								oldest = time.Since(frame.sentAt)
+								oldestFN = fn
+							}
 						}
-					}
-					bc.pendingAckMu.RUnlock()
-					if oldest > time.Second {
-						log.Debugf("Frame %d has not been acked for %v\n", oldestFN, oldest)
+						bc.pendingAckMu.RUnlock()
+						if oldest > time.Second {
+							log.Debugf("Frame %d has not been acked for %v\n", oldestFN, oldest)
+						}
 					}
 				}
 			}()
